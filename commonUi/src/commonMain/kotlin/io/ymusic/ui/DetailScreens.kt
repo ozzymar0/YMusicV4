@@ -154,6 +154,17 @@ class PlaylistSession(
             removeResult = try {
                 graph.engines.removeFromPlaylist(token, log)
                 feed.pager.removeItems { it.removeToken == token }
+                val account = graph.account.account.value?.channelId
+                    ?: graph.settings.string(LastAuthenticatedChannelId, "").value.takeIf(String::isNotBlank)
+                if (account != null) {
+                    try {
+                        graph.offlinePlaylistSnapshots?.removeCachedVideo(account, url, item.id)
+                    } catch (cancel: CancellationException) {
+                        throw cancel
+                    } catch (error: Exception) {
+                        log?.log(Logger.Level.WARN, "offline snapshot could not reflect confirmed video removal", error)
+                    }
+                }
                 Result.success(item)
             } catch (error: CancellationException) {
                 throw error
