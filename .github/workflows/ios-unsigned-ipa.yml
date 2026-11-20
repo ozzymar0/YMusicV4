@@ -126,8 +126,8 @@ jobs:
           test -s "$framework"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundlePackageType' "$app/Info.plist")" = APPL
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Info.plist")" = com.ymusic.iosapp
-          xcrun lipo -verify_arch arm64 "$executable"
-          xcrun lipo -verify_arch arm64 "$framework"
+          xcrun lipo "$executable" -verify_arch arm64
+          xcrun lipo "$framework" -verify_arch arm64
           file "$executable" "$framework"
           payload="$RUNNER_TEMP/YMusicIPAPayload"
           mkdir -p "$payload/Payload"
