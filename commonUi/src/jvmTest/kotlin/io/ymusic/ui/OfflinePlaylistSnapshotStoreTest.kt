@@ -52,6 +52,15 @@ class OfflinePlaylistSnapshotStoreTest {
         assertNull(store.load("UC-one", "/playlist?list=PLtwo"))
     }
 
+    @Test fun cloudRemovalUpdatesOnlyOneRepeatedPlaylistEntry() = withStore { store ->
+        store.savePage("UC-own", "/playlist?list=PLone", page(video("v1"), video("v2"), video("v1")), null)
+        assertEquals(true, store.removeCachedVideo("UC-own", "/playlist?list=PLone", "v1"))
+        assertEquals(listOf("v2", "v1"),
+            store.load("UC-own", "/playlist?list=PLone")!!.sections.single().items.map { it.id })
+        assertEquals(false, store.removeCachedVideo("UC-other", "/playlist?list=PLone", "v1"))
+        assertEquals(false, store.removeCachedVideo("UC-own", "/playlist?list=PLone", "missing"))
+    }
+
     @Test fun newOnlinePageReplacesOldSnapshot() = withStore { store ->
         store.savePage("UC-one", "/playlist?list=PLone", page(video("old")), null)
         store.savePage("UC-one", "/playlist?list=PLone", page(video("new")), null)
