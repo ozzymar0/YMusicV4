@@ -4,6 +4,9 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
@@ -26,10 +29,12 @@ import androidx.compose.material.icons.outlined.ThumbUp
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.produceState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -73,6 +78,10 @@ internal fun AccountLibraryScreen(
         CenteredBox { CircularProgressIndicator() }
         return
     }
+    if (feedState is Pager.State.Failed && coordinator.graph.offlinePlaylistSnapshots != null) {
+        OfflineAccountPlaylists(coordinator.graph, onOpen)
+        return
+    }
     FeedList(
         session.pager,
         coordinator,
@@ -84,6 +93,67 @@ internal fun AccountLibraryScreen(
             { AccountLibraryHeader(acct, onSignOut, onSwitchAccount, onDeeplink) }
         },
     )
+}
+
+/** Offline-only view of previously visited cloud playlists, not locally-created playlists. */
+@Composable
+internal fun OfflineAccountPlaylists(
+    graph: AppGraph,
+    onOpen: ((YtFeedItem) -> Unit)?,
+    onSignIn: (() -> Unit)? = null,
+) {
+    val store = graph.offlinePlaylistSnapshots
+    val accountId = graph.account.account.value?.channelId
+        ?: graph.settings.string(LastAuthenticatedChannelId, "").value
+    val entries by produceState(emptyList<OfflinePlaylistLink>(), store, accountId) {
+        value = if (accountId.isBlank() || store == null) emptyList() else store.list(accountId)
+    }
+    LazyColumn(
+        Modifier.fillMaxSize(),
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        item {
+            Text(
+                "Saved YouTube playlists (offline)",
+                style = TextStyle(fontSize = 19.sp, fontWeight = FontWeight.SemiBold, color = DesignColors.Ink),
+            )
+        }
+        if (entries.isEmpty()) {
+            item { Text("No previously opened playlists are saved on this device.", color = DesignColors.InkSecondary) }
+        }
+        items(entries, key = { it.url }) { entry ->
+            Row(
+                Modifier.fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(DesignColors.SurfaceDim)
+                    .clickable(enabled = onOpen != null) {
+                        onOpen?.invoke(
+                            YtFeedItem(
+                                kind = YtFeedItem.KIND_PLAYLIST,
+                                id = entry.url,
+                                title = entry.title,
+                                url = entry.url,
+                            )
+                        )
+                    }
+                    .padding(16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Icon(Icons.Outlined.Subscriptions, contentDescription = null)
+                Column(Modifier.weight(1f)) {
+                    Text(entry.title, fontWeight = FontWeight.Medium, color = DesignColors.Ink)
+                    entry.count?.let { count ->
+                        Text(count.toString() + " songs", color = DesignColors.InkSecondary)
+                    }
+                }
+            }
+        }
+        if (onSignIn != null) {
+            item { OutlinedButton(onClick = onSignIn) { Text("Sign in") } }
+        }
+    }
 }
 
 @Composable

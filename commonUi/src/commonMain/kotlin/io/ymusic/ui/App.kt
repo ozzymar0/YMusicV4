@@ -1555,6 +1555,13 @@ private fun DiscoverFeed(
                 onOpen = onOpen,
                 onDeeplink = onDeeplink,
             )
+        } else if (
+            graph.offlinePlaylistSnapshots != null &&
+            graph.settings.string(LastAuthenticatedChannelId, "").value.isNotBlank()
+        ) {
+            // A startup network failure may leave the cookie probe unable to confirm sign-in.
+            // The account-scoped saved playlist links still open without connecting to YouTube.
+            OfflineAccountPlaylists(graph, onOpen, onSignIn = onLogin)
         } else {
             LoginPreface(onLogin)
         }

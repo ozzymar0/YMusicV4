@@ -212,7 +212,7 @@ impl QueueItem {
             thumbs: item.thumbs.clone(),
             media_id: None,
             history_code: None,
-            youtube_vid: None,
+            youtube_vid: Some(item.id.clone()),
             loudness_gain_db: None,
             live: item.live,
         }
@@ -266,6 +266,10 @@ impl QueueItem {
     }
 
     pub fn key(&self) -> String {
+        // A cloud row stays identified by its YouTube video ID even when its audio plays locally.
+        if self.history_code.is_none() && let Some(video_id) = &self.youtube_vid {
+            return video_id.clone();
+        }
         match &self.source {
             Source::YouTube(video_id) => video_id.clone(),
             Source::Local(path) => path.to_string_lossy().into_owned(),
@@ -275,6 +279,7 @@ impl QueueItem {
     pub fn video_id(&self) -> Option<&str> {
         match &self.source {
             Source::YouTube(video_id) => Some(video_id),
+            Source::Local(_) if self.history_code.is_none() => self.youtube_vid.as_deref(),
             Source::Local(_) => None,
         }
     }
@@ -1901,7 +1906,25 @@ impl Playback {
     }
 
     fn load_current(&mut self, cx: &mut Context<Self>) {
-        let Some(item) = self.current().cloned() else { return };
+        let Some(mut item) = self.current().cloned() else { return };
+        // A playlist item remains one cloud entry. Resolve its audio at each load, so a removed
+        // local download falls back to YouTube and a newly-downloaded one is used on the next play.
+        // Existing local Library items have a history_code and retain their original source.
+        if item.history_code.is_none()
+            && let Some(video_id) = item.youtube_vid.as_deref()
+        {
+            let media = cx.global::<AppGraph>().media.clone();
+            let candidate_paths = media
+                .audio_copies_for_youtube_video(video_id)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|row| PathBuf::from(row.uri));
+            let source = preferred_cloud_source(video_id, candidate_paths);
+            if let Some(current) = self.queue.get_mut(self.index) {
+                current.source = source.clone();
+            }
+            item.source = source;
+        }
         self.load_generation += 1;
         self.position_ms = self.start_position_ms.max(0);
         self.buffered_ms = 0;
@@ -2668,4 +2691,53 @@ pub fn buffered_band(fraction: f32, accent: Hsla) -> Div {
         .flex()
         .items_center()
         .child(div().h(px(6.)).rounded_full().w(relative(fraction)).bg(accent.opacity(0.35)))
+}
+
+/// Choose a playable local audio copy without changing the YouTube playlist's membership.
+/// A missing or zero-byte file is never treated as downloaded; a later load can retry online.
+fn preferred_cloud_source(video_id: &str, paths: impl IntoIterator<Item = PathBuf>) -> Source {
+    for path in paths {
+        if std::fs::metadata(&path).is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0) {
+            return Source::Local(path);
+        }
+    }
+    Source::YouTube(video_id.to_owned())
+}
+
+#[cfg(test)]
+mod unified_offline_tests {
+    use super::{QueueItem, Source, preferred_cloud_source};
+    use std::path::PathBuf;
+
+    #[test]
+    fn missing_download_falls_back_to_same_youtube_id() {
+        let chosen = preferred_cloud_source("VIDEO_ID", [PathBuf::from("/nonexistent/YMusicOffline/audio.m4a")]);
+        assert_eq!(chosen, Source::YouTube("VIDEO_ID".to_owned()));
+    }
+
+    #[test]
+    fn empty_candidates_stay_online() {
+        assert_eq!(preferred_cloud_source("UNOFFICIAL_UPLOAD", []), Source::YouTube("UNOFFICIAL_UPLOAD".into()));
+    }
+
+    #[test]
+    fn cloud_queue_keeps_video_identity_when_playback_source_changes() {
+        let mut item = QueueItem {
+            source: Source::YouTube("VIDEO_ID".into()),
+            title: "Remix".into(),
+            artist: None,
+            duration_ms: None,
+            duration_label: None,
+            thumbs: Vec::new(),
+            media_id: None,
+            history_code: None,
+            youtube_vid: Some("VIDEO_ID".into()),
+            loudness_gain_db: None,
+            live: false,
+        };
+        item.source = Source::Local(PathBuf::from("/music/VIDEO_ID.m4a"));
+        assert_eq!(item.key(), "VIDEO_ID");
+        assert_eq!(item.video_id(), Some("VIDEO_ID"));
+        assert_eq!(item.downloadable(), Some("VIDEO_ID"));
+    }
 }

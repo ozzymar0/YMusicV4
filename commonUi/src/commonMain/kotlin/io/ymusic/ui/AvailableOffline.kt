@@ -21,21 +21,39 @@ internal val LocalAvailableOffline = compositionLocalOf<Set<String>> { emptySet(
  *  a scan, a delete). */
 @Composable
 internal fun rememberAvailableOffline(graph: AppGraph): Set<String> {
-    val store = graph.mediaStore ?: return emptySet()
-    val ids by produceState(emptySet<String>(), store) {
-        val log = graph.logger?.fork("available-offline")
-        store.itemsChanges().onStart { emit(Unit) }.collect {
-            try {
-                value = store.youtubeVideoIds()
-            } catch (c: CancellationException) {
-                throw c
-            } catch (e: Exception) {
-                // The marks keep their last value; the next item change reads again.
-                log?.captureUnlessEnvironmental(e, "available-offline ids failed to load")
+    val store = graph.mediaStore
+    val mediaIds by produceState(emptySet<String>(), store) {
+        if (store != null) {
+            val log = graph.logger?.fork("available-offline")
+            store.itemsChanges().onStart { emit(Unit) }.collect {
+                try {
+                    value = store.youtubeVideoIds()
+                } catch (c: CancellationException) {
+                    throw c
+                } catch (e: Exception) {
+                    log?.captureUnlessEnvironmental(e, "available-offline ids failed to load")
+                }
             }
         }
     }
-    return ids
+    val downloads = graph.downloads
+    val downloadIds by produceState(emptySet<String>(), downloads) {
+        if (downloads != null) {
+            val log = graph.logger?.fork("available-offline-downloads")
+            suspend fun refresh() {
+                try {
+                    value = indexCompletedAudioDownloads(downloads.snapshot(), ::isReadableDownloadedFile).keys.mapTo(mutableSetOf()) { it.videoId }
+                } catch (c: CancellationException) {
+                    throw c
+                } catch (e: Exception) {
+                    log?.captureUnlessEnvironmental(e, "downloaded ids failed to load")
+                }
+            }
+            refresh()
+            downloads.changes.collect { refresh() }
+        }
+    }
+    return mediaIds + downloadIds
 }
 
 /** True when [item] is a video the Library already holds. */

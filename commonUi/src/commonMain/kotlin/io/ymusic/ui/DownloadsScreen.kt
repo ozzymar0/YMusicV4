@@ -692,6 +692,7 @@ private class CompletedFileActions(
 
 @Composable
 private fun completedFileActions(graph: AppGraph, task: DownloadTask, service: DownloadService, onRename: () -> Unit): CompletedFileActions {
+    val scope = rememberCoroutineScope()
     val store = graph.mediaStore
     val songActions = LocalSongActions.current
     // The service registers the file in the Library only after the task turns COMPLETED; a file outside
@@ -723,6 +724,17 @@ private fun completedFileActions(graph: AppGraph, task: DownloadTask, service: D
         rename = if (graph.fileRenaming != null && fileUri != null && task.state == DownloadState.COMPLETED) onRename else null,
         deleteFile = if (item != null && songActions?.canDelete == true) {
             { songActions.requestDelete(item) { service.remove(task.id) } }
+        } else if (store == null && task.state == DownloadState.COMPLETED && fileUri != null) {
+            // iOS has no media-store row yet: delete only app-owned downloads, never a picked file.
+            {
+                scope.launch {
+                    try {
+                        service.deleteFinishedFile(task.id)
+                    } catch (failure: Exception) {
+                        graph.logger?.fork("downloads")?.log(Logger.Level.WARN, "downloaded file could not be removed", failure)
+                    }
+                }
+            }
         } else {
             null
         },

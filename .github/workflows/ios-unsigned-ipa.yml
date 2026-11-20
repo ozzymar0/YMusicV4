@@ -1,0 +1,148 @@
+name: Build unsigned iOS IPA
+
+on:
+  push:
+    branches:
+      - ci/ios-unsigned-ipa
+      - feature/unified-offline-library
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-unsigned-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FFMPEG_BUILD_REF: 4d2dc9ae0c73dc5f01733f18af070412013a6a93
+
+jobs:
+  ios-unsigned:
+    name: Build ARM64 device IPA (unsigned)
+    runs-on: macos-26
+    timeout-minutes: 180
+    steps:
+      - name: Check out YMusicV4
+        uses: actions/checkout@v4
+        with:
+          path: YMusicV4
+          persist-credentials: false
+
+      - name: Check out pinned FFmpeg build sources
+        uses: actions/checkout@v4
+        with:
+          repository: ymusic-io/ffmpeg-build
+          ref: ${{ env.FFMPEG_BUILD_REF }}
+          submodules: recursive
+          fetch-depth: 1
+          path: ffmpeg-build
+          persist-credentials: false
+
+      - name: Select Xcode 26.4
+        run: |
+          set -euo pipefail
+          sudo xcode-select -s /Applications/Xcode_26.4.1.app/Contents/Developer
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+          test "$(xcodebuild -version | head -n 1)" = 'Xcode 26.4.1'
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Restore FFmpeg iPhoneOS static libraries
+        id: ffmpeg-cache
+        uses: actions/cache@v4
+        with:
+          path: ffmpeg-build/out/ios-arm64
+          key: ffmpeg-ios-arm64-${{ runner.os }}-${{ env.FFMPEG_BUILD_REF }}-xcode26.4.1
+
+      - name: Install FFmpeg build dependencies
+        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        run: brew install nasm automake autoconf libtool pkg-config meson ninja
+
+      - name: Build iOS FFmpeg, dav1d, and libvpx
+        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        working-directory: ffmpeg-build
+        run: |
+          set -euo pipefail
+          scripts/build-ios.sh iphoneos
+
+      - name: Check FFmpeg static libraries
+        run: |
+          set -euo pipefail
+          for name in avcodec avformat avutil swscale swresample dav1d vpx; do
+            test -s "ffmpeg-build/out/ios-arm64/lib/lib${name}.a"
+          done
+          test -d ffmpeg-build/out/ios-arm64/include
+
+      - name: Build JavaScript engine and player bundles
+        working-directory: YMusicV4
+        run: |
+          set -euo pipefail
+          ./gradlew --no-daemon :engine-js:closureJs :engine-js:closurePlayerJs
+          test -s engine-js/build/dist/engine.js
+          test -s engine-js/build/dist/player.js
+
+      - name: Build unsigned iPhone app (including Kotlin framework)
+        working-directory: YMusicV4
+        env:
+          ORG_GRADLE_PROJECT_kmpTargets: all
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project iosApp/iosApp.xcodeproj \
+            -scheme iosApp \
+            -configuration Debug \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/YMusicDerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            'CODE_SIGN_IDENTITY=' \
+            'EXPANDED_CODE_SIGN_IDENTITY=' \
+            'DEVELOPMENT_TEAM=' \
+            build
+
+      - name: Validate real device app and package unsigned IPA
+        run: |
+          set -euo pipefail
+          app="$RUNNER_TEMP/YMusicDerivedData/Build/Products/Debug-iphoneos/iosApp.app"
+          executable="$app/iosApp"
+          framework="$app/Frameworks/YMusicApp.framework/YMusicApp"
+          test -d "$app"
+          test -s "$executable"
+          test -s "$framework"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundlePackageType' "$app/Info.plist")" = APPL
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Info.plist")" = com.ymusic.iosapp
+          xcrun lipo "$executable" -verify_arch arm64
+          xcrun lipo "$framework" -verify_arch arm64
+          file "$executable" "$framework"
+          payload="$RUNNER_TEMP/YMusicIPAPayload"
+          mkdir -p "$payload/Payload"
+          ditto "$app" "$payload/Payload/iosApp.app"
+          (cd "$payload" && ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/YMusic-unsigned-ios-arm64.ipa")
+          ipa="$GITHUB_WORKSPACE/YMusic-unsigned-ios-arm64.ipa"
+          unzip -t "$ipa" >/dev/null
+          unzip -Z1 "$ipa" | grep -Fx 'Payload/iosApp.app/iosApp'
+          unzip -Z1 "$ipa" | grep -Fx 'Payload/iosApp.app/Frameworks/YMusicApp.framework/YMusicApp'
+          ls -lh "$ipa"
+
+      - name: Upload unsigned IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: YMusic-unsigned-ios-arm64
+          path: YMusic-unsigned-ios-arm64.ipa
+          if-no-files-found: error
+          retention-days: 14

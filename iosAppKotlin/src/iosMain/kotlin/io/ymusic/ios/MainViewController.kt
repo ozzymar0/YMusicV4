@@ -14,6 +14,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.window.ComposeUIViewController
+import io.ymusic.download.DefaultDownloadStorage
+import io.ymusic.download.DownloadService
+import io.ymusic.download.DownloadStore
+import io.ymusic.download.downloadDatabaseNativeDriver
 import io.ymusic.dynamicengine.DynamicEngineManager
 import io.ymusic.dynamicengine.EMBEDDED_ENGINE_JS_VERSION
 import io.ymusic.dynamicengine.EMBEDDED_PLAYER_JS_VERSION
@@ -43,8 +47,10 @@ import io.ymusic.settings.flow
 import io.ymusic.settings.put
 import io.ymusic.ui.App
 import io.ymusic.ui.AppGraph
+import io.ymusic.ui.OfflinePlaylistSnapshotStore
 import io.ymusic.ui.AppHttpClients
 import io.ymusic.ui.CatalogueScreen
+import io.ymusic.ui.YtEngineSabrSpecResolver
 import io.ymusic.ui.ensureAppLanguage
 import io.ymusic.ui.playhistory.PlayHistoryStore
 import io.ymusic.ui.playhistory.playHistoryNativeDriver
@@ -60,6 +66,7 @@ import io.ymusic.ytmedia.cache.SqlDelightSegmentIndex
 import io.ymusic.ytmedia.cache.nativeSegmentDatabaseDriver
 import io.ymusic.ytmedia.proxy.LocalMediaProxy
 import kmpcommon.log.TeeLogger
+import kmpcommon.uri.fileUri
 import kmphttp.KmpHttpClient
 import kmphttp.RedirectOptions
 import kmphttp.create
@@ -303,12 +310,34 @@ private suspend fun buildIosGraph(container: UIView): AppGraph {
         ),
     )
 
+    // iOS has no document-folder picker yet. The output and resumable scratch bytes live in
+    // Application Support, never Caches, so offline files survive system cache eviction and upgrades.
+    val downloadFolder = dataDir.resolve("downloads")
+    FileSystem.SYSTEM.createDirectories(downloadFolder)
+    val downloadResolver = YtEngineSabrSpecResolver { msePlayer }
+    val downloads = DownloadService(
+        store = DownloadStore(downloadDatabaseNativeDriver(), rootLogger),
+        scope = backgroundScope,
+        now = now,
+        resolver = downloadResolver,
+        client = http.engine.newBuilder().apply { cookieJar = cookies }.build(),
+        userAgent = YOUTUBE_USER_AGENT,
+        ffmpeg = null,
+        storage = DefaultDownloadStorage(FileSystem.SYSTEM, dataDir.resolve("download-work")),
+        mediaCache = playerCache,
+        logger = rootLogger,
+        downloadFolder = { fileUri(downloadFolder.toString()).toString() },
+        playerResponse = { videoId -> downloadResolver.playerResponse(videoId) },
+    )
+
     val graph = AppGraph(
         engines = engines,
         player = player,
         logger = rootLogger,
         playerCache = playerCache,
+        downloads = downloads,
         mediaStore = null,
+        offlinePlaylistSnapshots = OfflinePlaylistSnapshotStore(dataDir.resolve("offline-playlists")),
         playHistory = PlayHistoryStore(playHistoryNativeDriver()),
         sponsorBlockStore = SqliteSponsorBlockStore(sponsorBlockNativeDriver()),
         scanLibraryFolder = null,

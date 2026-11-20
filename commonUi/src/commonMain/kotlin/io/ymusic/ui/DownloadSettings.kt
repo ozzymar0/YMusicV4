@@ -74,7 +74,7 @@ private fun DownloadLocationRow(graph: AppGraph) {
  *  or is excluded (the next download re-validates and re-picks). One indexed lookup per change. */
 @Composable
 internal fun rememberDownloadLocationName(graph: AppGraph): String? {
-    val mediaStore = graph.mediaStore ?: return null
+    val mediaStore = graph.mediaStore ?: return if (graph.downloads != null) "On this device" else null
     val location by remember(graph) { graph.settings.flow(AppSettings.downloadLocation) }.collectAsState()
     var name by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(location, mediaStore) {

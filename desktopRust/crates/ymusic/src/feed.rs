@@ -22,6 +22,7 @@ use crate::graph::{AppGraph, on_core};
 use crate::lazy_rows::LazyRows;
 use crate::local_playlist::LocalPlaylistFromDownloads;
 use crate::offline::{OfflineMarks, offline_mark};
+use crate::offline_playlists::{ACCOUNT_KEY, OfflinePlaylists};
 use crate::playlist_download::{OpenPlaylistDownload, PlaylistDownload};
 use crate::quick_download::saved_preset;
 use crate::settings_view::{HOVER_ALPHA, StackTones};
@@ -143,6 +144,46 @@ impl FeedSource {
                 let (query, params) = first_page(continuation, query, params);
                 engine.music_search(query, params, continuation, &log).await
             }
+        }
+    }
+}
+
+/// Keep the server's playlist page authoritative. A network failure may fall back to a
+/// previously visited playlist for exactly the account whose channel ID saved it.
+async fn playlist_offline_fallback(
+    response: Result<YtFeedPage, EngineError>,
+    source: FeedSource,
+    continuation: Option<String>,
+    account: String,
+    store: Arc<OfflinePlaylists>,
+    log: Logger,
+) -> Result<YtFeedPage, EngineError> {
+    match response {
+        Ok(page) => {
+            if !account.is_empty() && let FeedSource::Playlist(url) = source {
+                let saved = page.clone();
+                let log = log.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    if let Err(error) = store.save_page(&account, &url, &saved, continuation.as_deref()) {
+                        log.warn(&format!("Offline playlist snapshot could not be saved: {error}"), None);
+                    }
+                }).await;
+            }
+            Ok(page)
+        }
+        Err(error) => {
+            if !account.is_empty() && continuation.is_none() {
+                let snapshot = tokio::task::spawn_blocking(move || match source {
+                    FeedSource::Playlist(url) => store.load(&account, &url),
+                    FeedSource::Account => store.account_page(&account),
+                    _ => None,
+                }).await.ok().flatten();
+                if let Some(page) = snapshot {
+                    log.warn("Using saved playlist metadata after YouTube fetch failed", Some(&error));
+                    return Ok(page);
+                }
+            }
+            Err(error)
         }
     }
 }
@@ -684,7 +725,13 @@ impl FeedView {
     ) -> impl Future<Output = Option<Result<YtFeedPage, EngineError>>> + 'static {
         let graph = cx.global::<AppGraph>();
         let (engine, history, log) = (graph.engine(), graph.history.clone(), graph.log.fork("feed"));
-        on_core(cx, self.source.clone().load(engine, history, continuation, log))
+        let source = self.source.clone();
+        let store = graph.offline_playlists.clone();
+        let account = if graph.guest { String::new() } else { graph.settings.string(ACCOUNT_KEY, "").unwrap_or_default() };
+        on_core(cx, async move {
+            let response = source.clone().load(engine, history, continuation.clone(), log.clone()).await;
+            playlist_offline_fallback(response, source, continuation, account, store, log).await
+        })
     }
 
     fn load_reloaded(
@@ -693,7 +740,13 @@ impl FeedView {
     ) -> impl Future<Output = Option<Result<YtFeedPage, EngineError>>> + 'static {
         let graph = cx.global::<AppGraph>();
         let (engine, history, log) = (graph.engine(), graph.history.clone(), graph.log.fork("feed"));
-        on_core(cx, self.source.clone().reload(engine, history, log))
+        let source = self.source.clone();
+        let store = graph.offline_playlists.clone();
+        let account = if graph.guest { String::new() } else { graph.settings.string(ACCOUNT_KEY, "").unwrap_or_default() };
+        on_core(cx, async move {
+            let response = source.clone().reload(engine, history, log.clone()).await;
+            playlist_offline_fallback(response, source, None, account, store, log).await
+        })
     }
 
     fn fetch(&mut self, continuation: Option<String>, append: bool, cx: &mut Context<Self>) {

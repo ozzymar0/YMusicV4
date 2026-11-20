@@ -100,6 +100,7 @@ class AppGraph(
     val engines: DynamicEngineManager,
     val player: Player,
     val mediaStore: BetterMediaStore? = null,
+    val offlinePlaylistSnapshots: OfflinePlaylistSnapshotStore? = null,
     val playHistory: PlayHistoryStore? = null,
     /**
      * A throwaway guest launch: no sign-in, no account, no YouTube play history (Top tracks, Play

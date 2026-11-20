@@ -22,6 +22,7 @@ use ym_store::MediaStore;
 
 use crate::cookie_session::{CookieSession, ENGINE_CACHE_DIR, HTTP_CACHE_DIR, SealedJar};
 use crate::downloads::DownloadInputs;
+use crate::offline_playlists::OfflinePlaylists;
 use crate::youtube_session::{CandidateSource, YoutubeSessions};
 
 const ENGINE_JS: &str = include_str!(concat!(env!("YMUSIC_V4_DIR"), "/engine-js/build/dist/engine.js"));
@@ -68,6 +69,7 @@ pub struct AppGraph {
     /// The player's media cache (`player-cache`); `None` when it could not be opened.
     pub player_cache: Option<Arc<ym_ytmedia::cache::MediaCache>>,
     pub downloads: DownloadService,
+    pub offline_playlists: Arc<OfflinePlaylists>,
     pub history: Arc<ym_history::PlayHistory>,
     /// Files opened from outside the Library (Open with), kept out of Play again for the process.
     pub temporary_uris: Arc<Mutex<HashSet<PathBuf>>>,
@@ -306,6 +308,7 @@ impl AppGraph {
             youtube,
             player_cache,
             downloads,
+            offline_playlists: Arc::new(OfflinePlaylists::new(data_dir.join("offline-playlists"))),
             history,
             temporary_uris: Arc::default(),
             sponsor_block,

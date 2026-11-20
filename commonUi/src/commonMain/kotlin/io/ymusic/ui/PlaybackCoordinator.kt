@@ -144,61 +144,142 @@ class PlaybackCoordinator(
         }
     }
 
-    /** The video to hand the download launcher — only a non-live YouTube item is downloadable (local or
-     *  live → null).
-     *  The one place a queue item is rebuilt into a [YtFeedItem], for the launcher's API. */
-    fun downloadable(item: PlayableItem?): YtFeedItem? = (item as? PlayableItem.YtMedia)?.takeIf { !it.live }?.let {
-        YtFeedItem(
+    /** Download actions stay available even when the cloud entry is playing from a local copy. */
+    fun downloadable(item: PlayableItem?): YtFeedItem? {
+        val videoId = item?.videoId ?: return null
+        val yt = item as? PlayableItem.YtMedia
+        if (yt?.live == true) return null
+        return YtFeedItem(
             kind = YtFeedItem.KIND_VIDEO,
-            id = it.videoId,
-            title = it.title ?: it.videoId,
-            subtitleLine1 = it.artist,
-            channelTitle = it.artist,
-            channelUrl = it.channelUrl,
-            duration = it.duration,
-            thumbs = it.thumbnailUrl?.let { url -> listOf(YtThumb(url)) } ?: emptyList(),
+            id = videoId,
+            title = when (item) {
+                is PlayableItem.YtMedia -> item.title ?: videoId
+                is PlayableItem.LocalMedia -> item.title ?: videoId
+            },
+            subtitleLine1 = when (item) {
+                is PlayableItem.YtMedia -> item.artist
+                is PlayableItem.LocalMedia -> item.artist
+            },
+            channelTitle = when (item) {
+                is PlayableItem.YtMedia -> item.artist
+                is PlayableItem.LocalMedia -> item.artist
+            },
+            channelUrl = yt?.channelUrl,
+            duration = yt?.duration,
+            thumbs = item.displayThumbnailUrl?.let { listOf(YtThumb(it)) } ?: emptyList(),
         )
+    }
+
+    /** Snapshot on a worker, select the newest actually-readable audio file for each video ID.
+     * Neither playback nor download lookup changes any YouTube playlist membership. */
+    private suspend fun verifiedAudioCopies(): Map<CloudVideoKey, VerifiedAudioCopy> {
+        val downloads = graph.downloads ?: return emptyMap()
+        return withContext(Dispatchers.IO) {
+            indexCompletedAudioDownloads(downloads.snapshot(), ::isReadableDownloadedFile)
+        }
+    }
+
+    private fun playableWithCopy(item: PlayableItem.YtMedia, copies: Map<CloudVideoKey, VerifiedAudioCopy>): PlayableItem {
+        if (item.live) return item
+        return when (val choice = chooseUnifiedPlayback(CloudVideoKey(item.videoId), copies, isOnline = true)) {
+            is UnifiedPlaybackChoice.Local -> PlayableItem.LocalMedia(
+                uri = choice.uri,
+                title = item.title,
+                artist = item.artist,
+                thumbnailUrl = item.thumbnailUrl,
+                durationMs = item.durationMs,
+                videoId = item.videoId,
+            )
+            else -> item
+        }
+    }
+
+    /** New pages of a YouTube playlist use the same local-first policy as the first page. */
+    private fun withDownloadedPages(source: QueueSource?): QueueSource? {
+        if (source == null || graph.downloads == null) return source
+        return object : QueueSource {
+            override val totalCount: Int? get() = source.totalCount
+            override val resumeToken: String? get() = source.resumeToken
+            override suspend fun loadMore(): QueueSource.Page {
+                val page = source.loadMore()
+                val copies = verifiedAudioCopies()
+                return QueueSource.Page(
+                    page.items.map { item ->
+                        if (item is PlayableItem.YtMedia) playableWithCopy(item, copies) else item
+                    },
+                    page.hasMore,
+                )
+            }
+        }
     }
 
     private var lastRequest: QueueRequest? = null
     private var lastRequestQueueId: String? = null
 
-    /** Play [video] now with its radio (a YouTube Mix) as the rest of the queue, loading as it plays;
-     *  its related videos when YouTube has no radio for it. */
+    /** A streamed and downloaded video are the same queue entry, selected by video ID. */
     fun playNow(video: YtFeedItem) {
-        val items = listOf(video.toYtMedia())
-        startOnce(queueRequest(QueueOrigin.Radio, items, 0, "radio:${video.id}")) {
-            player.setQueue(
-                items,
-                source = NextQueueSource.radio(graph.engines, video.id, log?.fork("queue-source")),
-                origin = QueueOrigin.Radio,
-            )
+        if (graph.downloads == null) {
+            val items = listOf(video.toYtMedia())
+            startOnce(queueRequest(QueueOrigin.Radio, items, 0, "radio:${video.id}")) {
+                player.setQueue(items, source = NextQueueSource.radio(graph.engines, video.id, log?.fork("queue-source")), origin = QueueOrigin.Radio)
+            }
+            return
+        }
+        scope.launch {
+            val copies = verifiedAudioCopies()
+            val items = listOf(playableWithCopy(video.toYtMedia(), copies))
+            withContext(Dispatchers.Main) {
+                startOnce(queueRequest(QueueOrigin.Radio, items, 0, "radio:${video.id}")) {
+                    player.setQueue(items, source = withDownloadedPages(NextQueueSource.radio(graph.engines, video.id, log?.fork("queue-source"))), origin = QueueOrigin.Radio)
+                }
+            }
         }
     }
 
-    /** Play [video] alone — no radio. */
     fun playSingle(video: YtFeedItem) {
-        val items = listOf(video.toYtMedia())
-        startOnce(queueRequest(QueueOrigin.Single, items, 0, null)) {
-            player.setQueue(items, origin = QueueOrigin.Single)
+        if (graph.downloads == null) {
+            val items = listOf(video.toYtMedia())
+            startOnce(queueRequest(QueueOrigin.Single, items, 0, null)) {
+                player.setQueue(items, origin = QueueOrigin.Single)
+            }
+            return
+        }
+        scope.launch {
+            val copies = verifiedAudioCopies()
+            val items = listOf(playableWithCopy(video.toYtMedia(), copies))
+            withContext(Dispatchers.Main) {
+                startOnce(queueRequest(QueueOrigin.Single, items, 0, null)) {
+                    player.setQueue(items, origin = QueueOrigin.Single)
+                }
+            }
         }
     }
 
-    /** Play [videos] as the queue (a playlist page), starting at [startIndex]; [source] loads the rest of
-     *  the list as the queue goes. [shuffle] null keeps the user's shuffle mode. */
+    /** The playlist queue keeps its original YouTube order, selecting local audio where available. */
     fun playAll(videos: List<YtFeedItem>, startIndex: Int = 0, shuffle: Boolean? = null, source: QueueSource? = null) {
         val playable = videos.filter { it.kind == YtFeedItem.KIND_VIDEO }
         if (playable.isEmpty()) return
-        val items = playable.map { it.toYtMedia() }
         val index = startIndex.coerceIn(0, playable.size - 1)
-        startOnce(queueRequest(QueueOrigin.Playlist, items, index, source?.let { "playlist" }, shuffle)) {
-            shuffle?.let(player::setShuffle)
-            player.setQueue(items, playIndex = index, source = source, origin = QueueOrigin.Playlist)
+        if (graph.downloads == null) {
+            val items = playable.map { it.toYtMedia() }
+            startOnce(queueRequest(QueueOrigin.Playlist, items, index, source?.let { "playlist" }, shuffle)) {
+                shuffle?.let(player::setShuffle)
+                player.setQueue(items, playIndex = index, source = source, origin = QueueOrigin.Playlist)
+            }
+            return
+        }
+        scope.launch {
+            val copies = verifiedAudioCopies()
+            val items = playable.map { playableWithCopy(it.toYtMedia(), copies) }
+            withContext(Dispatchers.Main) {
+                startOnce(queueRequest(QueueOrigin.Playlist, items, index, source?.let { "playlist" }, shuffle)) {
+                    shuffle?.let(player::setShuffle)
+                    player.setQueue(items, playIndex = index, source = withDownloadedPages(source), origin = QueueOrigin.Playlist)
+                }
+            }
         }
     }
 
-    /** Play the playlist at [url] from [videoId], [page] being its loaded first page; the rest of the list
-     *  loads as the queue goes. False when [videoId] isn't on [page]. */
     fun playPlaylist(url: String, page: YtFeedPage, videoId: String): Boolean {
         val videos = page.sections.flatMap { it.items }.filter { it.kind == YtFeedItem.KIND_VIDEO }
         val index = videos.indexOfFirst { it.id == videoId }
@@ -321,21 +402,28 @@ class PlaybackCoordinator(
     }
 
     fun playNext(video: YtFeedItem) {
-        player.addToPlayNext(listOf(video.toYtMedia()))
+        if (graph.downloads == null) return player.addToPlayNext(listOf(video.toYtMedia()))
+        scope.launch {
+            val item = playableWithCopy(video.toYtMedia(), verifiedAudioCopies())
+            withContext(Dispatchers.Main) { player.addToPlayNext(listOf(item)) }
+        }
     }
 
     fun playLater(video: YtFeedItem) {
-        player.add(listOf(video.toYtMedia()))
+        if (graph.downloads == null) return player.add(listOf(video.toYtMedia()))
+        scope.launch {
+            val item = playableWithCopy(video.toYtMedia(), verifiedAudioCopies())
+            withContext(Dispatchers.Main) { player.add(listOf(item)) }
+        }
     }
 
     private suspend fun addWatchTime(item: PlayableItem, watchTimeMs: Long) {
         val history = playHistory ?: return
         when (item) {
             is PlayableItem.LocalMedia -> {
-                val id = item.mediaId ?: return
-                val row = mediaStore?.findItem(id) ?: return
-                history.trackLocal(row.playlistCode, watchTimeMs)
-                val vid = row.youtubeVid
+                val row = item.mediaId?.let { mediaStore?.findItem(it) }
+                if (row != null) history.trackLocal(row.playlistCode, watchTimeMs)
+                val vid = item.videoId ?: row?.youtubeVid
                 if (vid != null && !graph.guest) history.trackYoutube(vid, watchTimeMs)
             }
             is PlayableItem.YtMedia -> {

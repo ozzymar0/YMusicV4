@@ -521,6 +521,21 @@ impl MediaStore {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Audio files tagged with this ordinary YouTube video ID, newest first. A caller must
+    /// verify that a candidate still exists before routing playback. Read-only: this never
+    /// changes local playlists, YouTube membership, or existing downloaded files.
+    pub fn audio_copies_for_youtube_video(&self, video_id: &str) -> Result<Vec<MediaItem>, StoreError> {
+        let db = self.db.lock().unwrap();
+        let sql = format!(
+            "SELECT {ITEM_COLUMNS} FROM mediaItem \
+             WHERE youtubeVid = ?1 AND deleted = 0 AND audioCodec IS NOT NULL \
+             ORDER BY updatedAt DESC, id DESC"
+        );
+        let mut statement = db.prepare(&sql)?;
+        let rows = statement.query_map(params![video_id], item_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// The YouTube video ids the Library holds a file of.
     pub fn youtube_video_ids(&self) -> Result<Vec<String>, StoreError> {
         let db = self.db.lock().unwrap();

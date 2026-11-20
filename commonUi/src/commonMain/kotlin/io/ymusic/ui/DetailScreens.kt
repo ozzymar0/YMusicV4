@@ -104,8 +104,34 @@ class PlaylistSession(
     var saveResult by mutableStateOf<Result<Boolean>?>(null)
 
     val feed = FeedSession(scope, log) { continuation ->
-        graph.engines.extractPlaylistDetail(url, continuation = continuation, logger = log).also { page ->
-            page.pageHeader?.takeIf { it.savePlaylistId != null }?.let { saved = it.saved }
+        val snapshots = graph.offlinePlaylistSnapshots
+        val accountId = if (graph.guest) null else (
+            graph.account.account.value?.channelId
+                ?: graph.settings.string(LastAuthenticatedChannelId, "").value.takeIf(String::isNotBlank)
+        )
+        try {
+            graph.engines.extractPlaylistDetail(url, continuation = continuation, logger = log).also { page ->
+                page.pageHeader?.takeIf { it.savePlaylistId != null }?.let { saved = it.saved }
+                if (snapshots != null && accountId != null) {
+                    try {
+                        snapshots.savePage(accountId, url, page, continuation)
+                    } catch (cancel: CancellationException) {
+                        throw cancel
+                    } catch (e: Exception) {
+                        log?.log(Logger.Level.WARN, "could not cache playlist metadata", e)
+                    }
+                }
+            }
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (error: Exception) {
+            // A cached snapshot is only used if the server fetch failed; an online response
+            // always replaces it. Continuation pages don't replace the already-visible content.
+            if (continuation != null) throw error
+            val cached = accountId?.let { snapshots?.load(it, url) }
+            if (cached == null) throw error
+            log?.log(Logger.Level.WARN, "loading saved playlist metadata after fetch failure", error)
+            cached
         }
     }
 
