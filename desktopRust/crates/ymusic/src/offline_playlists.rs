@@ -161,10 +161,31 @@ impl OfflinePlaylists {
                 .or_else(|| old.as_ref().and_then(|previous| previous.item_count)),
             videos,
         };
+        self.write(&saved)
+    }
+
+    /// The network confirmed one YouTube entry was removed. Keep the matching offline
+    /// snapshot consistent without touching any device-local downloaded audio file.
+    pub fn remove_video(
+        &self, account: &str, url: &str, video_id: &str,
+    ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+        let _guard = self.lock.lock().map_err(|error| error.to_string())?;
+        let Some(mut saved) = self.read(account, url) else { return Ok(false) };
+        let Some(index) = saved.videos.iter().position(|video| video.id == video_id) else {
+            return Ok(false);
+        };
+        // One occurrence only: repeated YouTube video IDs can be distinct playlist rows.
+        saved.videos.remove(index);
+        saved.item_count = saved.item_count.map(|count| count.saturating_sub(1).max(0));
+        self.write(&saved)?;
+        Ok(true)
+    }
+
+    fn write(&self, saved: &SavedPlaylist) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         fs::create_dir_all(&self.directory)?;
-        let target = self.file(account, url);
+        let target = self.file(&saved.account, &saved.url);
         let temp = target.with_extension("json.tmp");
-        fs::write(&temp, serde_json::to_vec(&saved)?)?;
+        fs::write(&temp, serde_json::to_vec(saved)?)?;
         // Windows RenameFile does not replace an existing target. Preserve the previous
         // snapshot as a backup until the new snapshot is safely published.
         let backup = target.with_extension("json.bak");
@@ -254,6 +275,20 @@ mod tests {
         assert!(cached.sections[0].items.iter().all(|item| item.remove_token.is_none()));
         assert!(cached.continuation.is_none());
         assert!(store.load("UC-other", "/playlist?list=PLone").is_none());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn removing_one_cloud_entry_does_not_remove_duplicate_video_or_other_accounts() {
+        let (dir, store) = temp_store();
+        store.save_page("UC-own", "/playlist?list=PLone",
+            &page(&[("video-a", "A"), ("video-b", "B"), ("video-a", "A again")]), None).unwrap();
+        assert!(store.remove_video("UC-own", "/playlist?list=PLone", "video-a").unwrap());
+        let remaining = store.load("UC-own", "/playlist?list=PLone").unwrap();
+        assert_eq!(remaining.sections[0].items.iter().map(|item| item.id.as_str()).collect::<Vec<_>>(),
+            vec!["video-b", "video-a"]);
+        assert!(!store.remove_video("UC-other", "/playlist?list=PLone", "video-a").unwrap());
+        assert!(!store.remove_video("UC-own", "/playlist?list=PLone", "missing").unwrap());
         let _ = fs::remove_dir_all(dir);
     }
 
