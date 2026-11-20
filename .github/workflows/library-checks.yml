@@ -133,6 +133,7 @@ jobs:
           export FFMPEG_BUILD_DIR="$(cygpath -m "$GITHUB_WORKSPACE/ffmpeg-build")"
           cargo test --locked -p ymusic unified_offline_tests
           cargo test --locked -p ymusic offline_playlists::tests
+          cargo test --locked -p ymusic download_index::tests
       - name: Build portable production Windows application and dependencies
         working-directory: desktopRust
         shell: bash
