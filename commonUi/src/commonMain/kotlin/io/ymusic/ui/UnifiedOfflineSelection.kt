@@ -1,5 +1,13 @@
 package io.ymusic.ui
 
+import io.ymusic.download.DownloadState
+import io.ymusic.download.DownloadTask
+import kmpcommon.uri.Uri
+import kmpcommon.uri.filePath
+import okio.FileSystem
+import okio.Path.Companion.toPath
+
+
 /** A YouTube video stays the same library entry regardless of the playlists containing it. */
 internal data class CloudVideoKey(val videoId: String) {
     init { require(videoId.isNotBlank()) }
@@ -41,3 +49,33 @@ internal fun downloadedInPlaylist(
     membership: CloudPlaylistMembership,
     copies: Map<CloudVideoKey, VerifiedAudioCopy>,
 ): Boolean = membership.video in copies
+
+/** Map existing download records to *one verified audio copy per YouTube video ID*.
+ * Multiple playlist memberships still refer to the original video ID. A stale row never shadows a
+ * newer valid file; completed video-only or interrupted downloads never appear as available audio. */
+internal fun indexCompletedAudioDownloads(
+    tasks: List<DownloadTask>,
+    readable: (String) -> Boolean,
+): Map<CloudVideoKey, VerifiedAudioCopy> =
+    tasks.asSequence()
+        .filter { it.state == DownloadState.COMPLETED && it.format.name in setOf("M4A", "MP3", "AUDIO_WEBM") }
+        .sortedByDescending { it.updatedAt }
+        .mapNotNull { task ->
+            val uri = task.fileUri ?: return@mapNotNull null
+            if (task.videoId.isBlank() || !readable(uri)) return@mapNotNull null
+            val key = CloudVideoKey(task.videoId)
+            key to VerifiedAudioCopy(key, uri)
+        }
+        .distinctBy { it.first }
+        .toMap()
+
+/** Filesystem boundary for both playback and downloaded indicators; never trusts a DB row alone. */
+internal fun isReadableDownloadedFile(fileUri: String): Boolean = try {
+    val uri = Uri.parse(fileUri)
+    if (uri.scheme != "file") false else {
+        val file = FileSystem.SYSTEM.metadataOrNull(uri.filePath().toPath())
+        file?.isRegularFile == true && (file.size ?: 0L) > 0L
+    }
+} catch (_: Exception) {
+    false
+}
