@@ -165,10 +165,24 @@ impl OfflinePlaylists {
         let target = self.file(account, url);
         let temp = target.with_extension("json.tmp");
         fs::write(&temp, serde_json::to_vec(&saved)?)?;
+        // Windows RenameFile does not replace an existing target. Preserve the previous
+        // snapshot as a backup until the new snapshot is safely published.
+        let backup = target.with_extension("json.bak");
+        if target.exists() {
+            let _ = fs::remove_file(&backup);
+            if let Err(error) = fs::rename(&target, &backup) {
+                let _ = fs::remove_file(&temp);
+                return Err(Box::new(error));
+            }
+        }
         if let Err(error) = fs::rename(&temp, &target) {
+            if backup.exists() {
+                let _ = fs::rename(&backup, &target);
+            }
             let _ = fs::remove_file(&temp);
             return Err(Box::new(error));
         }
+        let _ = fs::remove_file(&backup);
         Ok(())
     }
 
