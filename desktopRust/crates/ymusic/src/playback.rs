@@ -1913,13 +1913,18 @@ impl Playback {
         if item.history_code.is_none()
             && let Some(video_id) = item.youtube_vid.as_deref()
         {
-            let media = cx.global::<AppGraph>().media.clone();
-            let candidate_paths = media
+            let graph = cx.global::<AppGraph>();
+            // A newly finished download is playable even before the tag scanner registers a
+            // MediaStore row. Both sources remain device-local; no cloud playlist is rewritten.
+            let from_downloads = graph.offline_downloads.read().ok()
+                .and_then(|index| index.get(video_id).cloned())
+                .unwrap_or_default();
+            let from_library = graph.media
                 .audio_copies_for_youtube_video(video_id)
                 .unwrap_or_default()
                 .into_iter()
                 .map(|row| PathBuf::from(row.uri));
-            let source = preferred_cloud_source(video_id, candidate_paths);
+            let source = preferred_cloud_source(video_id, from_downloads.into_iter().chain(from_library));
             if let Some(current) = self.queue.get_mut(self.index) {
                 current.source = source.clone();
             }
