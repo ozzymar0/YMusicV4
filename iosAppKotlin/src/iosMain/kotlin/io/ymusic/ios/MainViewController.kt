@@ -47,6 +47,7 @@ import io.ymusic.settings.flow
 import io.ymusic.settings.put
 import io.ymusic.ui.App
 import io.ymusic.ui.AppGraph
+import io.ymusic.ui.OfflinePlaylistSnapshotStore
 import io.ymusic.ui.AppHttpClients
 import io.ymusic.ui.CatalogueScreen
 import io.ymusic.ui.YtEngineSabrSpecResolver
@@ -336,6 +337,7 @@ private suspend fun buildIosGraph(container: UIView): AppGraph {
         playerCache = playerCache,
         downloads = downloads,
         mediaStore = null,
+        offlinePlaylistSnapshots = OfflinePlaylistSnapshotStore(dataDir.resolve("offline-playlists")),
         playHistory = PlayHistoryStore(playHistoryNativeDriver()),
         sponsorBlockStore = SqliteSponsorBlockStore(sponsorBlockNativeDriver()),
         scanLibraryFolder = null,
