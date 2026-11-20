@@ -48,7 +48,7 @@ class OfflinePlaylistSnapshotStore(
                 .filter { it.name.startsWith("playlist-") && it.name.endsWith(".json") }
                 .mapNotNull { path ->
                     try {
-                        val root = Json.parseToJsonElement(fileSystem.source(path).buffer().use { it.readUtf8() }).jsonObject
+                        val root = Json.parseToJsonElement(readText(path)).jsonObject
                         if (root["version"]?.jsonPrimitive?.content != "1" ||
                             root["account"]?.jsonPrimitive?.content != accountId) return@mapNotNull null
                         val url = root["url"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
@@ -99,7 +99,7 @@ class OfflinePlaylistSnapshotStore(
                 val target = file(accountId, url)
                 val temp = directory / (target.name + ".tmp")
                 try {
-                    fileSystem.sink(temp).buffer().use { it.writeUtf8(root.toString()) }
+                    writeText(temp, root.toString())
                     fileSystem.atomicMove(temp, target)
                 } finally {
                     fileSystem.delete(temp, mustExist = false)
@@ -120,7 +120,7 @@ class OfflinePlaylistSnapshotStore(
         return try {
             val target = file(accountId, url)
             if (!fileSystem.exists(target)) return null
-            val root = Json.parseToJsonElement(fileSystem.source(target).buffer().use { it.readUtf8() }).jsonObject
+            val root = Json.parseToJsonElement(readText(target)).jsonObject
             if (root["version"]?.jsonPrimitive?.content != "1" ||
                 root["account"]?.jsonPrimitive?.content != accountId ||
                 root["url"]?.jsonPrimitive?.content != url) return null
@@ -150,6 +150,25 @@ class OfflinePlaylistSnapshotStore(
             throw cancel
         } catch (_: Exception) {
             null
+        }
+    }
+
+    /** Explicit close works on all Kotlin targets, including Kotlin/Native where JVM's use is unavailable. */
+    private fun readText(path: Path): String {
+        val source = fileSystem.source(path).buffer()
+        try {
+            return source.readUtf8()
+        } finally {
+            source.close()
+        }
+    }
+
+    private fun writeText(path: Path, contents: String) {
+        val sink = fileSystem.sink(path).buffer()
+        try {
+            sink.writeUtf8(contents)
+        } finally {
+            sink.close()
         }
     }
 
