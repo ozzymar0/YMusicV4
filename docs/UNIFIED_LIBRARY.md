@@ -24,13 +24,19 @@ The shared `AvailableOffline` indicator reads both the media store (when present
 
 On iOS, **Remove from disk** invokes `DownloadService.deleteFinishedFile`. It only deletes completed downloads immediately inside the current app download directory, then removes that download row. It does not modify a YouTube playlist. The older **Remove** (download-history-only) action in other parts of the UI remains separate to avoid unexpectedly destroying existing user files.
 
+## Previously visited playlists while offline (Kotlin/iOS)
+
+A successful YouTube playlist detail fetch writes the playable video entries (video IDs, titles, artwork references and order) to an account-scoped JSON snapshot in Application Support. Continuation pages append to that snapshot. Failed network fetches fall back to a matching saved playlist; previously saved playlists are also listed in the Account tab if the startup account probe cannot connect. The account ID is the last confirmed YouTube channel ID, cleared on explicit sign-out or account switch. Cached mutation tokens are never used, and an online fetch remains authoritative.
+
+This is **device-local metadata caching**, not a synchronized offline database. Playlists must have been opened online at least once on each device to be available offline. Windows Rust still needs an equivalent persistent offline playlist browser; its current custom code only provides local-first playback for entries in a loaded cloud playlist.
+
 ## Data-preservation rules
 
 No existing `downloads.db`, local `media-store.db`, cookie jar or playlist has been reset, rewritten or migrated. No downloaded file is moved at application startup. The new iOS files use the app's established Application Support area; the existing Rust and Kotlin local libraries remain at their prior locations. The added code does not write to YouTube playlists on download or removal.
 
 ## Known limitations — not yet implemented
 
-1. **Offline browsing of the original YouTube playlists is not solved.** The app does not yet persist an account-scoped, complete and ordered playlist snapshot for offline navigation. Offline playback from a playlist page already loaded in memory can select local files, but re-opening an unloaded YouTube playlist without connectivity is not guaranteed to work.
+1. **Offline playlist browsing is partial.** The Kotlin/iOS app caches previously visited playlist entries and exposes those snapshots when YouTube cannot be reached, but Windows Rust has no corresponding persistent playlist-browser cache yet. Unvisited playlists cannot be opened offline.
 2. **Full bidirectional playlist editing has not been verified.** Existing authentication/engine code supports cloud feed retrieval, add and create operations. Delete, reorder, rename and multi-device propagation still need integration and live-account tests.
 3. **Network reachability is not yet part of queue source selection.** A missing local copy falls back to the YouTube player, whose network error handling applies even when fully offline.
 4. **Kotlin queues resolve existing downloaded files at construction/page-load time, not before every next-track load.** A file removed during an active queue may cause a local file-missing error. Rust re-resolves on each load.
