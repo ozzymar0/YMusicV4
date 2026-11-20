@@ -26,9 +26,9 @@ jobs:
       - name: Validate offline selection and download tests
         run: ./gradlew --no-daemon :commonUi:jvmTest :download:jvmTest
   windows:
-    name: Windows Rust desktop checks (MinGW)
+    name: Windows Rust checks and portable x64 app (MinGW)
     runs-on: windows-2022
-    timeout-minutes: 120
+    timeout-minutes: 240
     steps:
       - name: Disable Git CRLF rewrites
         shell: bash
@@ -133,3 +133,23 @@ jobs:
           export FFMPEG_BUILD_DIR="$(cygpath -m "$GITHUB_WORKSPACE/ffmpeg-build")"
           cargo test --locked -p ymusic unified_offline_tests
           cargo test --locked -p ymusic offline_playlists::tests
+      - name: Build portable production Windows application and dependencies
+        working-directory: desktopRust
+        shell: bash
+        run: |
+          set -euo pipefail
+          mingw="$(cygpath -u '${{ steps.msys2.outputs.msys2-location }}')/mingw64/bin"
+          export PATH="$mingw:$PATH"
+          export YMUSIC_V4_DIR="$GITHUB_WORKSPACE"
+          export FFMPEG_BUILD_DIR="$GITHUB_WORKSPACE/ffmpeg-build"
+          tools/package-windows.sh --out "$GITHUB_WORKSPACE/dist"
+          test -s "$GITHUB_WORKSPACE/dist/YMusic/YMusic.exe"
+          test -s "$GITHUB_WORKSPACE/dist/YMusic/ffmpeg.exe"
+          find "$GITHUB_WORKSPACE/dist/YMusic" -maxdepth 1 -type f -print
+      - name: Publish portable Windows x64 app
+        uses: actions/upload-artifact@v4
+        with:
+          name: YMusic-Windows-x64-unified-offline-portable
+          path: dist/YMusic/
+          if-no-files-found: error
+          retention-days: 14
