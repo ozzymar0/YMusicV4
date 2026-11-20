@@ -10,11 +10,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.unit.dp
 import io.ymusic.dynamicengine.yt.YtFeedItem
-import io.ymusic.download.DownloadState
-import kmpcommon.uri.Uri
-import kmpcommon.uri.filePath
-import okio.FileSystem
-import okio.Path.Companion.toPath
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.onStart
 import projectcommon.log.captureUnlessEnvironmental
@@ -47,15 +42,7 @@ internal fun rememberAvailableOffline(graph: AppGraph): Set<String> {
             val log = graph.logger?.fork("available-offline-downloads")
             suspend fun refresh() {
                 try {
-                    value = downloads.snapshot().asSequence()
-                        .filter { it.state == DownloadState.COMPLETED && it.format.name in setOf("M4A", "MP3", "AUDIO_WEBM") }
-                        .filter { task ->
-                            val uri = task.fileUri?.let(Uri::parse) ?: return@filter false
-                            if (uri.scheme != "file") return@filter false
-                            val meta = FileSystem.SYSTEM.metadataOrNull(uri.filePath().toPath())
-                            meta?.isRegularFile == true && (meta.size ?: 0L) > 0L
-                        }
-                        .map { it.videoId }.toSet()
+                    value = indexCompletedAudioDownloads(downloads.snapshot(), ::isReadableDownloadedFile).keys.mapTo(mutableSetOf()) { it.videoId }
                 } catch (c: CancellationException) {
                     throw c
                 } catch (e: Exception) {
