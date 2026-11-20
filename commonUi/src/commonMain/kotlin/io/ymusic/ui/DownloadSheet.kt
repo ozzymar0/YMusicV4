@@ -484,7 +484,7 @@ private fun OptionRow(icon: ImageVector, title: String, value: String, onClick: 
     Row(
         Modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick)
+            .clickable(enabled = onClick != null) { onClick?.invoke() }
             .padding(vertical = DesignSpacing.Space16),
         horizontalArrangement = Arrangement.spacedBy(DesignSpacing.Space16),
         verticalAlignment = Alignment.CenterVertically,
