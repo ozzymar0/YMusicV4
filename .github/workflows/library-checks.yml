@@ -28,21 +28,47 @@ jobs:
       - name: Validate offline selection and download tests
         run: ./gradlew --no-daemon :commonUi:jvmTest :download:jvmTest
   windows:
-    name: Windows Rust desktop checks
-    runs-on: windows-2025
+    name: Windows Rust desktop checks (MinGW)
+    runs-on: windows-2022
     timeout-minutes: 120
-    defaults:
-      run:
-        working-directory: desktopRust
     steps:
+      - name: Disable Git CRLF rewrites
+        shell: bash
+        run: git config --global core.autocrlf false
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      # Match upstream's MinGW Rust target. QuickJS's C sources are not MSVC-compatible.
+      - uses: msys2/setup-msys2@v2
+        id: msys2
         with:
-          components: rustfmt
+          msystem: MINGW64
+          cache: false
+      - name: Install MinGW GCC
+        shell: msys2 {0}
+        run: pacman --noconfirm -S --needed mingw-w64-x86_64-toolchain
+      - name: Install Rust GNU host
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install stable-x86_64-pc-windows-gnu --profile minimal
+          rustup default stable-x86_64-pc-windows-gnu
+          rustc -vV
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: desktopRust
-      - name: Test Rust media database
-        run: cargo test --locked -p ym-store
-      - name: Check Windows desktop compilation
-        run: cargo check --locked -p ymusic
+          workspaces: desktopRust -> target
+          key: windows-x86_64-gnu
+      - name: Test Rust media store
+        working-directory: desktopRust
+        shell: bash
+        run: |
+          set -euo pipefail
+          mingw="$(cygpath -u '${{ steps.msys2.outputs.msys2-location }}')/mingw64/bin"
+          export PATH="$mingw:$PATH"
+          cargo test --locked -p ym-store
+      - name: Check Windows Rust application
+        working-directory: desktopRust
+        shell: bash
+        run: |
+          set -euo pipefail
+          mingw="$(cygpath -u '${{ steps.msys2.outputs.msys2-location }}')/mingw64/bin"
+          export PATH="$mingw:$PATH"
+          cargo check --locked -p ymusic
