@@ -26,6 +26,7 @@ use crate::download_dialog::{DownloadPicker, DownloadTarget};
 use crate::downloads::pick_download_folder;
 use crate::file_rename::RenameFileDialog;
 use crate::graph::{AppGraph, on_core};
+use crate::item_menu::{ItemMenu, on_right_click};
 use crate::lazy_rows::LazyRows;
 use crate::library::PlayLocal;
 use crate::library_playlist::AddToLocalPlaylist;
@@ -595,6 +596,11 @@ fn can_resume(task: &DownloadTask, cx: &App) -> bool {
     }
 }
 
+/// Cancel on the selection bar: the states the card's menu offers Cancel in.
+fn can_cancel(task: &DownloadTask) -> bool {
+    task.state.is_active() || task.state == DownloadState::Paused
+}
+
 fn retry_dialog(
     title: &'static str,
     message: &'static str,
@@ -698,7 +704,8 @@ fn state_label(state: DownloadState) -> &'static str {
 const LOAD_FAILED: &str = "R90034";
 const SELECTION_PAUSE: usize = BAR_ACTIONS;
 const SELECTION_RESUME: usize = BAR_ACTIONS + 1;
-const SELECTION_MORE: usize = BAR_ACTIONS + 2;
+const SELECTION_CANCEL: usize = BAR_ACTIONS + 2;
+const SELECTION_MORE: usize = BAR_ACTIONS + 3;
 const DELETE_SELECTED_FAILED: &str = "R90041";
 const CARD_MIN: f32 = 340.;
 const CARD_ROW_ESTIMATE: f32 = 120.;
@@ -767,6 +774,35 @@ impl DownloadsView {
         self.clear_selection(cx);
     }
 
+    fn cancel_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let ids: HashSet<String> =
+            self.selected_tasks().filter(|task| can_cancel(task)).map(|task| task.id.clone()).collect();
+        let count = ids.len() as i64;
+        let view = cx.entity().downgrade();
+        crate::elevated_dialog::ConfirmDialog::new(
+            plural(Plural::DownloadsCancelSelectedTitle, count, &[&count]),
+            t(Str::DownloadsCancelSelectedMessage),
+            t(Str::DownloadsCancelSelected),
+        )
+        .cancel(t(Str::DownloadsCancelSelectedKeep))
+        .open(window, cx, move |_, cx| {
+            view.update(cx, |view, cx| {
+                // Re-read the states: a task that finished or failed while the dialog was up keeps its result.
+                let cancelable: HashSet<String> = view
+                    .tasks
+                    .iter()
+                    .filter(|task| ids.contains(&task.id) && can_cancel(task))
+                    .map(|task| task.id.clone())
+                    .collect();
+                for id in &cancelable {
+                    view.service.cancel(id);
+                }
+                view.clear_selection_removing(cancelable, cx);
+            })
+            .ok();
+        });
+    }
+
     /// Every selected task, whatever its state.
     fn remove_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let ids: Vec<String> = self.selected_tasks().map(|task| task.id.clone()).collect();
@@ -804,7 +840,7 @@ impl DownloadsView {
     }
 
     /// The bar that stands in for the section's while selecting: close · "N selected" · Select all ·
-    /// Pause · Resume · ⋮ (Remove from list, Remove from disk), each action shown when some selected
+    /// Pause · Resume · Cancel · ⋮ (Remove from list, Remove from disk), each action shown when some selected
     /// task can take it.
     fn selection_bar(&self, cx: &mut Context<Self>) -> AnyElement {
         let selected: Vec<&DownloadTask> = self.selected_tasks().collect();
@@ -816,6 +852,10 @@ impl DownloadsView {
         let resume = selected.iter().any(|task| can_resume(task, cx)).then(|| {
             action_icon("selection-resume", MaterialIcon::PlayArrow, t(Str::DownloadsActionResume))
                 .on_click(cx.listener(|view, _, _, cx| view.resume_selected(cx)))
+        });
+        let cancel = selected.iter().any(|task| can_cancel(task)).then(|| {
+            action_icon("selection-cancel", MaterialIcon::Cancel, t(Str::DownloadsCancelSelected))
+                .on_click(cx.listener(|view, _, window, cx| view.cancel_selected(window, cx)))
         });
         let view = cx.entity().downgrade();
         let can_delete = !self.deletable.is_empty();
@@ -842,6 +882,7 @@ impl DownloadsView {
         )
         .children(pause.map(|pause| self.bar_focus.button(SELECTION_PAUSE, pause, cx)))
         .children(resume.map(|resume| self.bar_focus.button(SELECTION_RESUME, resume, cx)))
+        .children(cancel.map(|cancel| self.bar_focus.button(SELECTION_CANCEL, cancel, cx)))
         .child(self.bar_focus.wrap(SELECTION_MORE, more, cx))
         .into_any_element()
     }
@@ -860,115 +901,109 @@ impl DownloadsView {
         )
     }
 
-    fn menu(&self, row: usize, task: &DownloadTask, cx: &mut Context<Self>) -> impl IntoElement {
+    fn menu(&self, task: &DownloadTask, cx: &mut Context<Self>) -> ItemMenu {
         let view = cx.entity().downgrade();
         let task = task.clone();
-        let more = action_icon(("download-more", row), MaterialIcon::MoreVert, t(Str::CdMore));
-        let menu =
-            self.focus.menu_button(row, more, cx).dropdown_menu_with_anchor(Anchor::TopRight, move |mut menu, _, _| {
-                let id = task.id.clone();
-                let act = |label: &'static str, action: fn(&DownloadService, &str)| {
-                    let (view, id) = (view.clone(), id.clone());
-                    PopupMenuItem::new(label).on_click(move |_, _, cx| {
-                        view.update(cx, |view, _| action(&view.service, &id)).ok();
-                    })
-                };
-                let share = || {
-                    let video_id = task.video_id.clone();
-                    PopupMenuItem::new(t(Str::CdShare)).on_click(move |_, window, cx| {
-                        if let Some(link) = crate::feed::youtube_share_link("video", &video_id) {
-                            cx.write_to_clipboard(ClipboardItem::new_string(link));
-                            window.push_notification(t(Str::LinkCopied), cx);
-                        }
-                    })
-                };
-                let other_format = || {
-                    let task = task.clone();
-                    PopupMenuItem::new(t(Str::DownloadOtherFormat))
-                        .on_click(move |_, window, cx| DownloadsView::other_format(&task, window, cx))
-                };
-                match task.state {
-                    DownloadState::Queued
-                    | DownloadState::Preparing
-                    | DownloadState::Downloading
-                    | DownloadState::Processing => {
-                        menu = menu
-                            .item(act(t(Str::DownloadsActionPause), DownloadService::pause))
-                            .item(act(t(Str::DialogCancel), DownloadService::cancel));
+        ItemMenu::new(move |mut menu, _, _| {
+            let id = task.id.clone();
+            let act = |label: &'static str, action: fn(&DownloadService, &str)| {
+                let (view, id) = (view.clone(), id.clone());
+                PopupMenuItem::new(label).on_click(move |_, _, cx| {
+                    view.update(cx, |view, _| action(&view.service, &id)).ok();
+                })
+            };
+            let share = || {
+                let video_id = task.video_id.clone();
+                PopupMenuItem::new(t(Str::CdShare)).on_click(move |_, window, cx| {
+                    if let Some(link) = crate::feed::youtube_share_link("video", &video_id) {
+                        cx.write_to_clipboard(ClipboardItem::new_string(link));
+                        window.push_notification(t(Str::LinkCopied), cx);
                     }
-                    DownloadState::Paused => {
-                        menu = menu
-                            .item(act(t(Str::DownloadsActionResume), DownloadService::resume))
-                            .item(act(t(Str::DialogCancel), DownloadService::cancel));
-                    }
-                    DownloadState::Failed => {
-                        let (retry_view, retry_task) = (view.clone(), task.clone());
-                        menu = menu
-                            .item(PopupMenuItem::new(t(Str::Retry)).on_click(move |_, window, cx| {
-                                retry_view.update(cx, |view, cx| view.retry(&retry_task, window, cx)).ok();
-                            }))
-                            .item(other_format())
-                            .item(share())
-                            .item(act(t(Str::MenuRemove), DownloadService::remove));
-                    }
-                    DownloadState::Completed => {
-                        let (play_view, play_task) = (view.clone(), task.clone());
-                        menu = menu.item(PopupMenuItem::new(t(Str::MenuPlay)).on_click(move |_, _, cx| {
-                            play_view.update(cx, |view, cx| view.play(&play_task, cx)).ok();
-                        }));
-                        let code = task.video_id.clone();
-                        menu = menu
-                            .item(PopupMenuItem::new(t(Str::MenuAddToPlaylist)).on_click(move |_, window, cx| {
-                                AddToLocalPlaylist::open(vec![code.clone()], None, window, cx)
-                            }))
-                            .item(other_format());
-                        if let Some(path) = file_path(&task) {
-                            let (library_view, file, renamed) = (view.clone(), path.clone(), path.clone());
-                            menu = menu
-                                .item(PopupMenuItem::new(t(Str::DownloadsActionRevealLibrary)).on_click(
-                                    move |_, _, cx| {
-                                        let file = file.clone();
-                                        library_view.update(cx, |_, cx| cx.emit(RevealInLibrary { file })).ok();
-                                    },
-                                ))
-                                .item(
-                                    PopupMenuItem::new(crate::library::reveal_label())
-                                        .on_click(move |_, _, cx| cx.reveal_path(&path)),
-                                )
-                                .item(PopupMenuItem::new(t(Str::MenuRename)).on_click(move |_, window, cx| {
-                                    RenameFileDialog::open(renamed.clone(), window, cx)
-                                }));
-                        }
-                        menu = menu.item(share());
-                        let (disk_view, disk_task) = (view.clone(), task.clone());
-                        menu = menu.separator().item(act(t(Str::MenuRemove), DownloadService::remove)).item(
-                            PopupMenuItem::new(t(Str::MenuRemoveFromDisk)).on_click(move |_, window, cx| {
-                                let (view, task) = (disk_view.clone(), disk_task.clone());
-                                crate::elevated_dialog::ConfirmDialog::new(
-                                    t(Str::DeleteFromDiskTitle),
-                                    tf(Str::DeleteFromDiskMessage, &[&task.title]),
-                                    t(Str::DeleteFromDiskConfirm),
-                                )
-                                .destructive()
-                                .open(window, cx, move |window, cx| {
-                                    view.update(cx, |view, cx| view.remove_from_disk(task.clone(), window, cx)).ok();
-                                });
-                            }),
-                        );
-                    }
-                    DownloadState::Canceled => {
-                        menu = menu
-                            .item(other_format())
-                            .item(share())
-                            .item(act(t(Str::MenuRemove), DownloadService::remove));
-                    }
+                })
+            };
+            let other_format = || {
+                let task = task.clone();
+                PopupMenuItem::new(t(Str::DownloadOtherFormat))
+                    .on_click(move |_, window, cx| DownloadsView::other_format(&task, window, cx))
+            };
+            match task.state {
+                DownloadState::Queued
+                | DownloadState::Preparing
+                | DownloadState::Downloading
+                | DownloadState::Processing => {
+                    menu = menu
+                        .item(act(t(Str::DownloadsActionPause), DownloadService::pause))
+                        .item(act(t(Str::DialogCancel), DownloadService::cancel));
                 }
-                let (select_view, select_id) = (view.clone(), task.id.clone());
-                menu.item(PopupMenuItem::new(t(Str::DownloadsActionSelect)).on_click(move |_, _, cx| {
-                    select_view.update(cx, |view, cx| view.start_selection(select_id.clone(), cx)).ok();
-                }))
-            });
-        own_press(menu)
+                DownloadState::Paused => {
+                    menu = menu
+                        .item(act(t(Str::DownloadsActionResume), DownloadService::resume))
+                        .item(act(t(Str::DialogCancel), DownloadService::cancel));
+                }
+                DownloadState::Failed => {
+                    let (retry_view, retry_task) = (view.clone(), task.clone());
+                    menu = menu
+                        .item(PopupMenuItem::new(t(Str::Retry)).on_click(move |_, window, cx| {
+                            retry_view.update(cx, |view, cx| view.retry(&retry_task, window, cx)).ok();
+                        }))
+                        .item(other_format())
+                        .item(share())
+                        .item(act(t(Str::MenuRemove), DownloadService::remove));
+                }
+                DownloadState::Completed => {
+                    let (play_view, play_task) = (view.clone(), task.clone());
+                    menu = menu.item(PopupMenuItem::new(t(Str::MenuPlay)).on_click(move |_, _, cx| {
+                        play_view.update(cx, |view, cx| view.play(&play_task, cx)).ok();
+                    }));
+                    let code = task.video_id.clone();
+                    menu = menu
+                        .item(PopupMenuItem::new(t(Str::MenuAddToPlaylist)).on_click(move |_, window, cx| {
+                            AddToLocalPlaylist::open(vec![code.clone()], None, window, cx)
+                        }))
+                        .item(other_format());
+                    if let Some(path) = file_path(&task) {
+                        let (library_view, file, renamed) = (view.clone(), path.clone(), path.clone());
+                        menu = menu
+                            .item(PopupMenuItem::new(t(Str::DownloadsActionRevealLibrary)).on_click(move |_, _, cx| {
+                                let file = file.clone();
+                                library_view.update(cx, |_, cx| cx.emit(RevealInLibrary { file })).ok();
+                            }))
+                            .item(
+                                PopupMenuItem::new(crate::library::reveal_label())
+                                    .on_click(move |_, _, cx| cx.reveal_path(&path)),
+                            )
+                            .item(
+                                PopupMenuItem::new(t(Str::MenuRename))
+                                    .on_click(move |_, window, cx| RenameFileDialog::open(renamed.clone(), window, cx)),
+                            );
+                    }
+                    menu = menu.item(share());
+                    let (disk_view, disk_task) = (view.clone(), task.clone());
+                    menu = menu.separator().item(act(t(Str::MenuRemove), DownloadService::remove)).item(
+                        PopupMenuItem::new(t(Str::MenuRemoveFromDisk)).on_click(move |_, window, cx| {
+                            let (view, task) = (disk_view.clone(), disk_task.clone());
+                            crate::elevated_dialog::ConfirmDialog::new(
+                                t(Str::DeleteFromDiskTitle),
+                                tf(Str::DeleteFromDiskMessage, &[&task.title]),
+                                t(Str::DeleteFromDiskConfirm),
+                            )
+                            .destructive()
+                            .open(window, cx, move |window, cx| {
+                                view.update(cx, |view, cx| view.remove_from_disk(task.clone(), window, cx)).ok();
+                            });
+                        }),
+                    );
+                }
+                DownloadState::Canceled => {
+                    menu =
+                        menu.item(other_format()).item(share()).item(act(t(Str::MenuRemove), DownloadService::remove));
+                }
+            }
+            let (select_view, select_id) = (view.clone(), task.id.clone());
+            menu.item(PopupMenuItem::new(t(Str::DownloadsActionSelect)).on_click(move |_, _, cx| {
+                select_view.update(cx, |view, cx| view.start_selection(select_id.clone(), cx)).ok();
+            }))
+        })
     }
 
     fn card(&self, row: usize, task: &DownloadTask, cx: &mut Context<Self>) -> AnyElement {
@@ -1057,12 +1092,16 @@ impl DownloadsView {
         let selecting = self.selecting();
         let checked = self.selection.contains(&task.id);
         let (click_id, press_id) = (task.id.clone(), task.id.clone());
-        let trailing = if selecting {
-            self.check(row, task, checked, cx).into_any_element()
-        } else {
-            self.menu(row, task, cx).into_any_element()
+        let menu = (!selecting).then(|| self.menu(task, cx));
+        let trailing = match &menu {
+            None => self.check(row, task, checked, cx).into_any_element(),
+            Some(menu) => {
+                let more = action_icon(("download-more", row), MaterialIcon::MoreVert, t(Str::CdMore));
+                own_press(menu.dropdown(self.focus.menu_button(row, more, cx), Anchor::TopRight)).into_any_element()
+            }
         };
-        self.focus
+        let card = self
+            .focus
             .item(
                 row,
                 list_item(v_flex().id(("download", row)), row)
@@ -1172,8 +1211,8 @@ impl DownloadsView {
                         ),
                     )
                     .child(if failed { detail } else { div().flex_1().child(detail).into_any_element() }),
-            )
-            .into_any_element()
+            );
+        on_right_click(card, menu.as_ref()).into_any_element()
     }
 }
 

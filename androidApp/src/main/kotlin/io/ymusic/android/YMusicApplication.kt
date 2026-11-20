@@ -23,10 +23,10 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.sentry.kotlin.multiplatform.Sentry
 import io.ymusic.download.DownloadChange
 import io.ymusic.download.DownloadFolderAccessException
@@ -464,11 +464,15 @@ class YMusicApplication : Application() {
                 imageNetworkFetcher,
                 fileFetcher(),
                 ffmpegBin?.let {
+                    val artLogger = rootLogger.fork("local-art")
                     mediaStoreArtFetcher(
                         FfmpegMetadataGetter(it, AndroidFfInputResolver(contentResolver)),
                         mediaStore,
                         loaderYoutubeArt { checkNotNull(loaderRef) },
+                        artLogger,
                         coverCache = ImageSourceCache(FileSystem.SYSTEM, cacheDir.resolve("image-cover-cache").toOkioPath(), 32L * 1024 * 1024),
+                        frameFallback = PlatformVideoFrameExtractor(this, artLogger),
+                        extractorVersion = BuildConfig.VERSION_CODE.toString(),
                     )
                 },
             ),
@@ -847,9 +851,9 @@ class YMusicApplication : Application() {
             // (unlike Swing/UIKit), so adding the container directly throws "child already has a
             // parent". So each AndroidView gets its own empty host and re-parents the shared container
             // into whichever is active, detaching from the previous parent first.
-            val queue by player.queue.collectAsState()
-            val config by player.config.collectAsState()
-            val quality by player.videoQuality.collectAsState()
+            val queue by player.queue.collectAsStateWithLifecycle()
+            val config by player.config.collectAsStateWithLifecycle()
+            val quality by player.videoQuality.collectAsStateWithLifecycle()
             val showMse = queue.currentItem is PlayableItem.YtMedia && showsVideo(config, quality)
             AndroidView(
                 factory = { context -> FrameLayout(context) },

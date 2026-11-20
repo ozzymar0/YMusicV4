@@ -110,6 +110,18 @@ fn apply_theme(choice: &str, accent: &str, cx: &mut App) {
         if cfg!(target_os = "linux") {
             theme.window_border = if theme.mode.is_dark() { white().opacity(0.07) } else { black().opacity(0.15) };
         }
+        // Material 3's snackbar shape on the theme's elevated surface; the toast keeps its shadow.
+        let (snackbar, snackbar_ink) = (palette.surface_elevated, palette.ink);
+        theme.notification.style = StyleRefinement::default()
+            .bg(snackbar)
+            .text_color(snackbar_ink)
+            .border_0()
+            .rounded(px(4.))
+            .px(px(16.))
+            .py(px(14.));
+        theme.notification.close_color = Some(snackbar_ink);
+        theme.notification.fit_content = true;
+        theme.notification.always_expanded = true;
         // On dark the full elevated lift reads too strongly against the body (ElevatedBarDialog).
         let dialog = if theme.mode.is_dark() { palette.surface_dim } else { palette.surface_elevated };
         tones = ChromeTones { flat: palette.surface, lifted: palette.surface_elevated, dialog };
@@ -160,6 +172,12 @@ pub struct StackTones {
 }
 
 impl Global for StackTones {}
+
+/// A notification action's ink: the accent, lifted toward white on the dark theme's snackbar.
+pub fn snackbar_action(cx: &App) -> Hsla {
+    let accent = cx.theme().primary;
+    if cx.theme().mode.is_dark() { oklab_lerp(accent, white(), 0.35) } else { accent }
+}
 
 /// Every menu as the JVM app draws Material 3's `DropdownMenu` (androidx material3 1.4 `Menu.kt`,
 /// `MenuTokens`, `ListTokens`) with its theme and `MoreMenuItem` / `MoreMenuDivider`.

@@ -15,10 +15,11 @@ use ym_i18n::{Str, t, tf};
 use ym_image_loader::async_image::async_image_of;
 
 use crate::a11y::{DragRow, FocusList, LoadMoreFocus, alert, announced, announced_as, heading, list_item};
-use crate::action_icon::{HIT, action_icon, auto_mirrored, sized_action_icon};
+use crate::action_icon::{HIT, ICON, action_icon, auto_mirrored, sized_action_icon};
 use crate::assets::MaterialIcon;
 use crate::download_dialog::DownloadTarget;
 use crate::graph::{AppGraph, on_core};
+use crate::item_menu::{ItemMenu, on_right_click};
 use crate::lazy_rows::LazyRows;
 use crate::local_playlist::LocalPlaylistFromDownloads;
 use crate::offline::{OfflineMarks, offline_mark};
@@ -255,6 +256,8 @@ pub struct FeedView {
     refiltering: Option<Refilter>,
     /// An F5 reload is in flight; the page stays up under the loading line until it lands.
     refreshing: bool,
+    /// A loaded page's `partial_error_code`, shown once as a notification on the next render.
+    error_code: Option<String>,
     generation: u64,
     scroll: ScrollHandle,
     /// Collapsible sections the user expanded, by index.
@@ -324,6 +327,7 @@ impl FeedView {
             more_focus: LoadMoreFocus::new(cx),
             refiltering: None,
             refreshing: false,
+            error_code: None,
             generation: 0,
             scroll: scroll.clone(),
             expanded: std::collections::HashSet::new(),
@@ -745,6 +749,7 @@ impl FeedView {
             page.page_header = self.page.page_header.take();
             page.page_tabs = std::mem::take(&mut self.page.page_tabs);
         }
+        self.error_code = page.partial_error_code.clone();
         self.page = page;
         self.phase = Phase::Ready;
         self.more_failed = None;
@@ -1098,11 +1103,16 @@ struct Bands {
     columns: usize,
     margin: f32,
     gutter: f32,
-    /// List thumbnails: square below 320 wide, 16:9 below 470.
+    /// List thumbnails: square below 320 wide, 16:9 below [`GRID_MIN`].
     square: bool,
 }
 
-const CARD_MAX: f32 = 324.;
+/// The narrowest a grid card may render; the column count is however many of these fit.
+const CARD_MIN: f32 = 270.;
+const COMPACT_MARGIN: f32 = 16.;
+const COMPACT_GUTTER: f32 = 8.;
+/// Where the grid starts: two [`CARD_MIN`] cards fit at the compact margin and gutter.
+const GRID_MIN: f32 = 2. * CARD_MIN + COMPACT_GUTTER + 2. * COMPACT_MARGIN;
 /// The sort menu, after any chip.
 const CHIPS_SORT: usize = 63;
 /// The page header's buttons, the empty state's and the failed Show more's text and buttons, as
@@ -1120,17 +1130,19 @@ const ACTION_SEARCH: usize = 9;
 const ACTION_RETRY_MORE: usize = 10;
 /// The page's Show more, after any chip.
 const CHIPS_SHOW_MORE: usize = 64;
+/// A grid card ⋮'s hit circle; its end overhangs into the card inset to bring the glyph to the edge.
+const GRID_MENU_HIT: f32 = 32.;
 const ROW_GAP: f32 = 16.;
 const FEED_ROW_ESTIMATE: f32 = 112.;
 const CAROUSEL_CELL: f32 = 80.;
 
 impl Bands {
     fn for_width(width: f32) -> Self {
-        let (margin, gutter) = if width >= 840. { (24., 16.) } else { (16., 8.) };
-        let columns = if width < 470. {
+        let (margin, gutter) = if width >= 840. { (24., 16.) } else { (COMPACT_MARGIN, COMPACT_GUTTER) };
+        let columns = if width < GRID_MIN {
             1
         } else {
-            (((width - 2. * margin + gutter) / (CARD_MAX + gutter)).ceil() as usize).max(2)
+            (((width - 2. * margin + gutter) / (CARD_MIN + gutter)).floor() as usize).max(2)
         };
         Self { columns, margin, gutter, square: width < 320. }
     }
@@ -1215,7 +1227,13 @@ impl FeedView {
         item.kind == "video" && self.offline.read(cx).contains(&item.id)
     }
 
-    fn more_menu(&self, item: &YtFeedItem, key: (&'static str, usize), cx: &mut Context<Self>) -> AnyElement {
+    fn more_button(&self, menu: &ItemMenu, key: (&'static str, usize), hit: f32, cx: &mut Context<Self>) -> AnyElement {
+        let glyph = Icon::new(MaterialIcon::MoreVert).text_color(cx.theme().muted_foreground);
+        let more = sized_action_icon(key, glyph, t(Str::CdMore), ICON, hit);
+        menu.dropdown(self.focus.menu_button(key.1, more, cx), Anchor::TopRight).into_any_element()
+    }
+
+    fn item_menu(&self, item: &YtFeedItem, cx: &mut Context<Self>) -> ItemMenu {
         let view = cx.entity().downgrade();
         let target = item.clone();
         let top_tracks = matches!(self.source, FeedSource::TopTracks);
@@ -1224,61 +1242,56 @@ impl FeedView {
         let channel_id = (item.kind == "channel" && signed_in)
             .then(|| item.channel_id.clone().unwrap_or_else(|| item.id.clone()))
             .filter(|id| !id.is_empty());
-        let more =
-            action_icon(key, Icon::new(MaterialIcon::MoreVert).text_color(cx.theme().muted_foreground), t(Str::CdMore));
-        self.focus
-            .menu_button(key.1, more, cx)
-            .dropdown_menu_with_anchor(Anchor::TopRight, move |mut menu, _, cx| {
-                let video = target.kind == "video";
-                let mut actions: Vec<(Str, MenuAction)> = Vec::new();
-                if video {
-                    actions.push((Str::MenuPlaySingle, MenuAction::PlaySingle));
-                    actions.push((Str::MenuStartRadio, MenuAction::Feed(FeedAction::Radio)));
-                    actions.push((Str::QueueNext, MenuAction::Feed(FeedAction::QueueNext)));
-                    actions.push((Str::QueueLast, MenuAction::Feed(FeedAction::QueueLast)));
-                    if !target.live {
-                        actions.push((Str::DownloadTitle, MenuAction::Feed(FeedAction::Download)));
-                    }
-                    actions.push((Str::CdAddToPlaylist, MenuAction::AddToPlaylist));
+        ItemMenu::new(move |mut menu, _, cx| {
+            let video = target.kind == "video";
+            let mut actions: Vec<(Str, MenuAction)> = Vec::new();
+            if video {
+                actions.push((Str::MenuPlaySingle, MenuAction::PlaySingle));
+                actions.push((Str::MenuStartRadio, MenuAction::Feed(FeedAction::Radio)));
+                actions.push((Str::QueueNext, MenuAction::Feed(FeedAction::QueueNext)));
+                actions.push((Str::QueueLast, MenuAction::Feed(FeedAction::QueueLast)));
+                if !target.live {
+                    actions.push((Str::DownloadTitle, MenuAction::Feed(FeedAction::Download)));
                 }
-                if target.remove_token.is_some() {
-                    actions.push((Str::MenuRemoveFromPlaylist, MenuAction::RemoveFromPlaylist));
-                }
-                if channel_id.is_some() {
-                    actions.push((Str::Subscribe, MenuAction::Subscribe(true)));
-                    actions.push((Str::Unsubscribe, MenuAction::Subscribe(false)));
-                }
-                if share_link(&target).is_some() {
-                    actions.push((Str::CdShare, MenuAction::Share));
-                }
-                if video && top_tracks {
-                    actions.push((Str::MenuRemove, MenuAction::RemoveFromTop));
-                }
-                for (label, action) in actions {
-                    let (view, item) = (view.clone(), target.clone());
-                    menu = menu.item(PopupMenuItem::new(t(label)).on_click(move |_, window, cx| {
-                        let item = item.clone();
-                        view.update(cx, |view, cx| view.menu_action(item, action, window, cx)).ok();
+                actions.push((Str::CdAddToPlaylist, MenuAction::AddToPlaylist));
+            }
+            if target.remove_token.is_some() {
+                actions.push((Str::MenuRemoveFromPlaylist, MenuAction::RemoveFromPlaylist));
+            }
+            if channel_id.is_some() {
+                actions.push((Str::Subscribe, MenuAction::Subscribe(true)));
+                actions.push((Str::Unsubscribe, MenuAction::Subscribe(false)));
+            }
+            if share_link(&target).is_some() {
+                actions.push((Str::CdShare, MenuAction::Share));
+            }
+            if video && top_tracks {
+                actions.push((Str::MenuRemove, MenuAction::RemoveFromTop));
+            }
+            for (label, action) in actions {
+                let (view, item) = (view.clone(), target.clone());
+                menu = menu.item(PopupMenuItem::new(t(label)).on_click(move |_, window, cx| {
+                    let item = item.clone();
+                    view.update(cx, |view, cx| view.menu_action(item, action, window, cx)).ok();
+                }));
+                if matches!(action, MenuAction::Feed(FeedAction::Download)) {
+                    let item = target.clone();
+                    let label = tf(Str::QuickDownloadMenu, &[&saved_preset(cx).short_label()]);
+                    menu = menu.item(PopupMenuItem::new(label).on_click(move |_, window, cx| {
+                        crate::quick_download::launch(DownloadTarget::from_feed(&item), window, cx);
                     }));
-                    if matches!(action, MenuAction::Feed(FeedAction::Download)) {
-                        let item = target.clone();
-                        let label = tf(Str::QuickDownloadMenu, &[&saved_preset(cx).short_label()]);
-                        menu = menu.item(PopupMenuItem::new(label).on_click(move |_, window, cx| {
-                            crate::quick_download::launch(DownloadTarget::from_feed(&item), window, cx);
-                        }));
-                    }
                 }
-                if video && downloaded {
-                    let video_id = target.id.clone();
-                    menu = menu.separator().label(t(Str::SectionLibrary)).item(
-                        PopupMenuItem::new(t(Str::CdAddToPlaylist)).on_click(move |_, window, cx| {
-                            crate::library_playlist::AddToLocalPlaylist::open(vec![video_id.clone()], None, window, cx);
-                        }),
-                    );
-                }
-                menu
-            })
-            .into_any_element()
+            }
+            if video && downloaded {
+                let video_id = target.id.clone();
+                menu = menu.separator().label(t(Str::SectionLibrary)).item(
+                    PopupMenuItem::new(t(Str::CdAddToPlaylist)).on_click(move |_, window, cx| {
+                        crate::library_playlist::AddToLocalPlaylist::open(vec![video_id.clone()], None, window, cx);
+                    }),
+                );
+            }
+            menu
+        })
     }
 
     /// Takes the item off the viewer's own playlist, then off this page.
@@ -1385,14 +1398,16 @@ impl FeedView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme().clone();
-        let more = self.more_menu(item, ("card-more", index), cx);
+        let hit = if item.kind == "channel" { HIT } else { GRID_MENU_HIT };
+        let menu = self.item_menu(item, cx);
+        let more = self.more_button(&menu, ("card-more", index), hit, cx);
         let card = self
             .clickable(("feed-card", index), position, item, queue, None, cx)
             .flex_1()
             .min_w_0()
             .p(px(bands.inset()));
         if item.kind == "channel" {
-            return card
+            let card = card
                 .relative()
                 .child(
                     v_flex()
@@ -1414,8 +1429,8 @@ impl FeedView {
                             column.child(div().text_xs().text_color(theme.muted_foreground).truncate().child(line))
                         }),
                 )
-                .child(div().absolute().top_0().right_0().child(more))
-                .into_any_element();
+                .child(div().absolute().top_0().right_0().child(more));
+            return on_right_click(card, Some(&menu)).into_any_element();
         }
         let stack_tab = (item.kind == "playlist").then(|| cx.global::<StackTones>().tab);
         let thumbnail = div()
@@ -1445,31 +1460,34 @@ impl FeedView {
                         .child(text),
                 )
             });
-        card.child(
-            div()
-                .relative()
-                .w_full()
-                .when_some(stack_tab, |art, color| art.child(playlist_tab(color)))
-                .child(thumbnail),
-        )
-        .child(
-            h_flex()
-                .pt_2()
-                .gap_2()
-                .items_start()
-                .child(
-                    v_flex()
-                        .flex_1()
-                        .min_w_0()
-                        .gap_1()
-                        .child(div().text_sm().font_medium().line_clamp(2).child(item.title.clone()))
-                        .when_some(subtitle(item), |column, line| {
-                            column.child(div().text_xs().text_color(theme.muted_foreground).truncate().child(line))
-                        }),
-                )
-                .child(more),
-        )
-        .into_any_element()
+        let card = card
+            .child(
+                div()
+                    .relative()
+                    .w_full()
+                    .when_some(stack_tab, |art, color| art.child(playlist_tab(color)))
+                    .child(thumbnail),
+            )
+            .child(
+                h_flex()
+                    .pt_2()
+                    .items_start()
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_1()
+                            .child(div().text_sm().font_medium().line_clamp(2).child(item.title.clone()))
+                            .when_some(subtitle(item), |column, line| {
+                                column.child(div().text_xs().text_color(theme.muted_foreground).truncate().child(line))
+                            }),
+                    )
+                    .child({
+                        let slot = div().mt(px(5.)).child(more);
+                        if ym_i18n::is_rtl() { slot.ml(px(-bands.inset())) } else { slot.mr(px(-bands.inset())) }
+                    }),
+            );
+        on_right_click(card, Some(&menu)).into_any_element()
     }
 
     /// A list row: thumbnail (square, 16:9, or a channel circle), then title and subtitle, ⋮ at the end.
@@ -1483,7 +1501,8 @@ impl FeedView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme().clone();
-        let more = self.more_menu(item, ("row-more", index), cx);
+        let menu = self.item_menu(item, cx);
+        let more = self.more_button(&menu, ("row-more", index), HIT, cx);
         let (width, height, round) = match item.kind.as_str() {
             "channel" => (74., 74., true),
             _ if bands.square => (92., 92., false),
@@ -1517,43 +1536,41 @@ impl FeedView {
                         .child(text),
                 )
             });
-        self.clickable(("feed-row", index), position, item, queue, None, cx)
-            .child(
-                h_flex()
-                    .pl_4()
-                    .pr_1()
-                    .py(px(10.))
-                    .gap_4()
-                    .items_start()
-                    .child(
-                        div()
-                            .relative()
-                            .flex_shrink_0()
-                            .w(px(width))
-                            .h(px(height))
-                            .children(stack.into_iter().flatten())
-                            .child(thumbnail),
-                    )
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .gap_1()
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_medium()
-                                    .line_clamp(if bands.square { 2 } else { 3 })
-                                    .child(item.title.clone()),
-                            )
-                            .when_some(subtitle(item), |column, line| {
-                                column
-                                    .child(div().text_xs().text_color(theme.muted_foreground).line_clamp(2).child(line))
-                            }),
-                    )
-                    .child(more),
-            )
-            .into_any_element()
+        let row = self.clickable(("feed-row", index), position, item, queue, None, cx).child(
+            h_flex()
+                .pl_4()
+                .pr_1()
+                .py(px(10.))
+                .gap_4()
+                .items_start()
+                .child(
+                    div()
+                        .relative()
+                        .flex_shrink_0()
+                        .w(px(width))
+                        .h(px(height))
+                        .children(stack.into_iter().flatten())
+                        .child(thumbnail),
+                )
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_medium()
+                                .line_clamp(if bands.square { 2 } else { 3 })
+                                .child(item.title.clone()),
+                        )
+                        .when_some(subtitle(item), |column, line| {
+                            column.child(div().text_xs().text_color(theme.muted_foreground).line_clamp(2).child(line))
+                        }),
+                )
+                .child(more),
+        );
+        on_right_click(row, Some(&menu)).into_any_element()
     }
 
     /// Accent tick, optional avatar, title, count, then "View all" or the collapse chevron.
@@ -1973,6 +1990,10 @@ pub fn youtube_share_link(kind: &str, id: &str) -> Option<String> {
 impl Render for FeedView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::shell::track_scroll(&self.scroll, cx);
+        if let Some(code) = self.error_code.take() {
+            let message = error_text(&EngineError::site(&code, "partial page failure"));
+            window.defer(cx, move |window, cx| window.push_notification(message, cx));
+        }
         match &self.phase {
             Phase::Loading => return centered(Spinner::new().large()).into_any_element(),
             Phase::Failed(error) => {
@@ -2115,18 +2136,29 @@ impl Render for FeedView {
             .relative()
             .children(tab_row)
             .child(
-                div().id("feed-scroll").flex_1().min_h_0().overflow_y_scroll().track_scroll(&self.scroll).child(column),
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .relative()
+                    .child(
+                        div()
+                            .id("feed-scroll")
+                            .size_full()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.scroll)
+                            .child(column),
+                    )
+                    .when(self.refreshing, |content| {
+                        content.child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .right_0()
+                                .child(LoadingLine::new("feed-refreshing", t(Str::A11yRefreshing))),
+                        )
+                    }),
             )
-            .when(self.refreshing, |feed| {
-                feed.child(
-                    div()
-                        .absolute()
-                        .top_0()
-                        .left_0()
-                        .right_0()
-                        .child(LoadingLine::new("feed-refreshing", t(Str::A11yRefreshing))),
-                )
-            })
             .into_any_element()
     }
 }
