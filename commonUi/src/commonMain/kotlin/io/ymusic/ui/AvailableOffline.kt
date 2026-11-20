@@ -11,6 +11,9 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.unit.dp
 import io.ymusic.dynamicengine.yt.YtFeedItem
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.IO
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.onStart
 import projectcommon.log.captureUnlessEnvironmental
 
@@ -27,7 +30,16 @@ internal fun rememberAvailableOffline(graph: AppGraph): Set<String> {
             val log = graph.logger?.fork("available-offline")
             store.itemsChanges().onStart { emit(Unit) }.collect {
                 try {
-                    value = store.youtubeVideoIds()
+                    // The metadata DB can outlive an externally deleted/moved file.
+                    // Verify file:// entries before marking them downloaded. Content-provider
+                    // URIs are validated by the platform's persisted grant when opened.
+                    val items = store.allItems()
+                    value = withContext(Dispatchers.IO) {
+                        items.asSequence()
+                            .filter { it.uri.scheme != "file" || isReadableDownloadedFile(it.uri.toString()) }
+                            .mapNotNull { it.youtubeVid }
+                            .toSet()
+                    }
                 } catch (c: CancellationException) {
                     throw c
                 } catch (e: Exception) {
