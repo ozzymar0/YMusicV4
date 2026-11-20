@@ -48,6 +48,21 @@ jobs:
             gh issue create --title "Upstream merge needs manual resolution ($GITHUB_RUN_ID)" --body "Conflicting files: $conflicts. See $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID. No changes made to master."
             exit 1
           fi
+          # GitHub's GITHUB_TOKEN cannot push upstream edits to workflow YAML files, even
+          # with contents:write. Keep our workflow files as-is and report upstream changes for
+          # separate review instead of letting the entire update PR fail or overwriting them.
+          workflow_changes="$(git diff --name-only master HEAD -- .github/workflows || true)"
+          if [ -n "$workflow_changes" ]; then
+            printf '%s\n' 'Workflow files changed upstream (separate review required):'
+            printf '%s\n' "$workflow_changes"
+            git restore --source=master --staged --worktree -- .github/workflows
+            git commit --amend --no-edit
+            {
+              echo 'workflow_changes<<EOF'
+              printf '%s\n' "$workflow_changes"
+              echo 'EOF'
+            } >> "$GITHUB_OUTPUT"
+          fi
           git push origin "HEAD:refs/heads/$branch"
           echo "branch=$branch" >> "$GITHUB_OUTPUT"
       - name: Set up Java for checks
@@ -79,11 +94,17 @@ jobs:
           BRANCH: ${{ steps.upstream.outputs.branch }}
           JS_RESULT: ${{ steps.js.outcome }}
           RUST_RESULT: ${{ steps.rust.outcome }}
+          WORKFLOW_CHANGES: ${{ steps.upstream.outputs.workflow_changes }}
         run: |
           set -euo pipefail
           gh pr create --base master --head "$BRANCH" --draft \
             --title 'Review upstream YMusicV4 updates' \
-            --body "Automatically proposed upstream merge. Manual review and merge required. JavaScript compilation: $JS_RESULT. Rust formatting: $RUST_RESULT. Custom changes have not been automatically overwritten."
+            --body "Automatically proposed upstream merge. Manual review and merge required. JavaScript compilation: $JS_RESULT. Rust formatting: $RUST_RESULT. Upstream workflow changes NOT included in this PR (GitHub Actions token lacks workflows permission): $WORKFLOW_CHANGES. Custom changes have not been automatically overwritten."
+          if [ -n "$WORKFLOW_CHANGES" ]; then
+            gh issue create \
+              --title "Review omitted upstream workflow updates ($GITHUB_RUN_ID)" \
+              --body "These upstream workflow paths were kept unchanged in the proposal because GitHub Actions cannot push workflow YAML modifications: $WORKFLOW_CHANGES. Review upstream changes separately before merging. Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          fi
           if [ "$JS_RESULT" != success ] || [ "$RUST_RESULT" != success ]; then
             echo 'One or more checks failed; draft PR remains open for review.' >&2
             exit 1
