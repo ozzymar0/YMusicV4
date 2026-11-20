@@ -10,6 +10,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.unit.dp
 import io.ymusic.dynamicengine.yt.YtFeedItem
+import io.ymusic.download.DownloadState
+import kmpcommon.uri.Uri
+import kmpcommon.uri.filePath
+import okio.FileSystem
+import okio.Path.Companion.toPath
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.onStart
 import projectcommon.log.captureUnlessEnvironmental
@@ -21,21 +26,47 @@ internal val LocalAvailableOffline = compositionLocalOf<Set<String>> { emptySet(
  *  a scan, a delete). */
 @Composable
 internal fun rememberAvailableOffline(graph: AppGraph): Set<String> {
-    val store = graph.mediaStore ?: return emptySet()
-    val ids by produceState(emptySet<String>(), store) {
-        val log = graph.logger?.fork("available-offline")
-        store.itemsChanges().onStart { emit(Unit) }.collect {
-            try {
-                value = store.youtubeVideoIds()
-            } catch (c: CancellationException) {
-                throw c
-            } catch (e: Exception) {
-                // The marks keep their last value; the next item change reads again.
-                log?.captureUnlessEnvironmental(e, "available-offline ids failed to load")
+    val store = graph.mediaStore
+    val mediaIds by produceState(emptySet<String>(), store) {
+        if (store != null) {
+            val log = graph.logger?.fork("available-offline")
+            store.itemsChanges().onStart { emit(Unit) }.collect {
+                try {
+                    value = store.youtubeVideoIds()
+                } catch (c: CancellationException) {
+                    throw c
+                } catch (e: Exception) {
+                    log?.captureUnlessEnvironmental(e, "available-offline ids failed to load")
+                }
             }
         }
     }
-    return ids
+    val downloads = graph.downloads
+    val downloadIds by produceState(emptySet<String>(), downloads) {
+        if (downloads != null) {
+            val log = graph.logger?.fork("available-offline-downloads")
+            suspend fun refresh() {
+                try {
+                    value = downloads.snapshot().asSequence()
+                        .filter { it.state == DownloadState.COMPLETED && it.format.name in setOf("M4A", "MP3", "AUDIO_WEBM") }
+                        .filter { task ->
+                            val uri = task.fileUri?.let(Uri::parse) ?: return@filter false
+                            if (uri.scheme != "file") return@filter false
+                            val meta = FileSystem.SYSTEM.metadataOrNull(uri.filePath().toPath())
+                            meta?.isRegularFile == true && (meta.size ?: 0L) > 0L
+                        }
+                        .map { it.videoId }.toSet()
+                } catch (c: CancellationException) {
+                    throw c
+                } catch (e: Exception) {
+                    log?.captureUnlessEnvironmental(e, "downloaded ids failed to load")
+                }
+            }
+            refresh()
+            downloads.changes.collect { refresh() }
+        }
+    }
+    return mediaIds + downloadIds
 }
 
 /** True when [item] is a video the Library already holds. */
