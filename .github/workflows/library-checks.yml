@@ -3,6 +3,7 @@ on:
   push:
     branches:
       - feature/unified-offline-library
+      - development/unified-library-integration
 permissions:
   contents: read
 concurrency:
