@@ -1430,8 +1430,25 @@ impl FeedView {
     fn remove_from_playlist(&mut self, item: YtFeedItem, window: &mut Window, cx: &mut Context<Self>) {
         let Some(token) = item.remove_token.clone() else { return };
         let graph = cx.global::<AppGraph>();
-        let (engine, log) = (graph.engine(), graph.log.fork("yt-playlist"));
-        let request = on_core(cx, async move { engine.remove_from_playlist(&token, &log).await });
+        let (engine, log, store) =
+            (graph.engine(), graph.log.fork("yt-playlist"), graph.offline_playlists.clone());
+        let account = if graph.guest { String::new() } else {
+            graph.settings.string(ACCOUNT_KEY, "").unwrap_or_default()
+        };
+        let url = self.playlist_url();
+        let video_id = item.id.clone();
+        let request = on_core(cx, async move {
+            engine.remove_from_playlist(&token, &log).await?;
+            if let Some(url) = url.filter(|_| !account.is_empty()) {
+                let saved = tokio::task::spawn_blocking(move || store.remove_video(&account, &url, &video_id)).await;
+                match saved {
+                    Ok(Err(error)) => log.warn("offline snapshot could not update after cloud removal", Some(error.as_ref())),
+                    Err(error) => log.warn("offline snapshot could not update after cloud removal", Some(&error)),
+                    Ok(Ok(_)) => {}
+                }
+            }
+            Ok(())
+        });
         cx.spawn_in(window, async move |this, cx| {
             let result = request.await;
             this.update_in(cx, |view, window, cx| {
