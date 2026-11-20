@@ -78,6 +78,23 @@ jobs:
           test -s ffmpeg-build/out/windows-x86_64/pack/ffmpeg.exe
           test -d ffmpeg-build/out/windows-x86_64/include
           test -d ffmpeg-build/out/windows-x86_64/lib
+      - name: Set up Java for required engine bundles
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Set up Node for required engine bundles
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Build JavaScript engine and player bundles for Rust includes
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./gradlew --no-daemon :engine-js:closureJs :engine-js:closurePlayerJs
+          test -s engine-js/build/dist/engine.js
+          test -s engine-js/build/dist/player.js
       - name: Install Rust GNU host
         shell: bash
         run: |
