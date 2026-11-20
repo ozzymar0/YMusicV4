@@ -20,10 +20,6 @@ import io.ymusic.ui.playhistory.PlayAgainSession
 import kmpcommon.log.Logger
 import kmpcommon.log.info
 import kmpcommon.uri.Uri
-import kmpcommon.uri.filePath
-import okio.FileSystem
-import okio.Path.Companion.toPath
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.IO
@@ -177,28 +173,9 @@ class PlaybackCoordinator(
     /** Snapshot on a worker, select the newest actually-readable audio file for each video ID.
      * Neither playback nor download lookup changes any YouTube playlist membership. */
     private suspend fun verifiedAudioCopies(): Map<CloudVideoKey, VerifiedAudioCopy> {
-        val service = graph.downloads ?: return emptyMap()
+        val downloads = graph.downloads ?: return emptyMap()
         return withContext(Dispatchers.IO) {
-            service.snapshot().asSequence()
-                .filter { it.state == DownloadState.COMPLETED }
-                .filter { it.format.name in setOf("M4A", "MP3", "AUDIO_WEBM") }
-                .sortedByDescending { it.updatedAt }
-                .mapNotNull { task ->
-                    try {
-                        val uri = Uri.parse(task.fileUri ?: return@mapNotNull null)
-                        if (uri.scheme != "file") return@mapNotNull null
-                        val metadata = FileSystem.SYSTEM.metadataOrNull(uri.filePath().toPath())
-                        if (metadata?.isRegularFile != true || (metadata.size ?: 0L) <= 0L) return@mapNotNull null
-                        val key = CloudVideoKey(task.videoId)
-                        key to VerifiedAudioCopy(key, uri.toString())
-                    } catch (c: CancellationException) {
-                        throw c
-                    } catch (_: Exception) {
-                        null
-                    }
-                }
-                .distinctBy { it.first }
-                .toMap()
+            indexCompletedAudioDownloads(downloads.snapshot(), ::isReadableDownloadedFile)
         }
     }
 
