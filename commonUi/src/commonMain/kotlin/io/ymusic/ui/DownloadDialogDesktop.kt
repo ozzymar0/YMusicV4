@@ -87,7 +87,7 @@ import org.jetbrains.compose.resources.stringResource
 internal fun DownloadDialogDesktop(
     state: DownloadOptionsState,
     locationName: String?,
-    onPickLocation: () -> Unit,
+    onPickLocation: (() -> Unit)?,
     onRetry: () -> Unit,
     onSignIn: (() -> Unit)?,
     onDownload: () -> Unit,
@@ -140,7 +140,7 @@ internal fun DownloadDialogDesktop(
 }
 
 @Composable
-private fun LeftPane(state: DownloadOptionsState, locationName: String?, onPickLocation: () -> Unit) {
+private fun LeftPane(state: DownloadOptionsState, locationName: String?, onPickLocation: (() -> Unit)?) {
     Column(
         Modifier.width(272.dp).fillMaxHeight().background(DesignColors.SurfaceDim).padding(DesignSpacing.Space24),
         verticalArrangement = Arrangement.spacedBy(DesignSpacing.Space16),
@@ -158,7 +158,8 @@ private fun LeftPane(state: DownloadOptionsState, locationName: String?, onPickL
         Column(verticalArrangement = Arrangement.spacedBy(DesignSpacing.Space4)) {
             Text(stringResource(Res.string.download_save_to), style = TextStyle(fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = DesignColors.InkSecondary))
             OutlinedButton(
-                onClick = onPickLocation,
+                onClick = { onPickLocation?.invoke() },
+                enabled = onPickLocation != null,
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(8.dp),
                 border = BorderStroke(1.dp, DesignColors.Outline),
