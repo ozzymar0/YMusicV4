@@ -70,6 +70,8 @@ material_icons! {
     Search => "filled/search",
     /// `Icons.Default.Close`.
     Close => "filled/close",
+    /// `Icons.Default.Cancel`.
+    Cancel => "filled/cancel",
     /// `Icons.Default.Check`.
     Check => "filled/check",
     /// `Icons.Default.Add`.
@@ -128,6 +130,8 @@ material_icons! {
     Favorite => "filled/favorite",
     /// `Icons.Default.SelectAll`.
     SelectAll => "filled/select_all",
+    /// `Icons.Default.GpsFixed`.
+    GpsFixed => "filled/gps_fixed",
     /// `Icons.Outlined.OndemandVideo`.
     OndemandVideoOutlined => "outlined/ondemand_video",
     /// `Icons.Outlined.LibraryMusic`.

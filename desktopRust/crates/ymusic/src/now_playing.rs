@@ -23,6 +23,7 @@ use crate::assets::MaterialIcon;
 use crate::audio_only::AudioOnlyArt;
 use crate::download_dialog::DownloadTarget;
 use crate::graph::{AppGraph, on_core};
+use crate::item_menu::{ItemMenu, on_right_click};
 use crate::lazy_rows::LazyRows;
 use crate::mini_player::{PlayClock, clock};
 use crate::playback::{
@@ -57,6 +58,7 @@ const STOP_SHUFFLE: usize = 7;
 const STOP_CHANNEL: usize = 8;
 const STOP_CHANNEL_OVERLAY: usize = 9;
 const STOP_QUEUE_MORE: usize = 10;
+const STOP_LOCATE: usize = 11;
 /// The video controls, as arrow stops of their own list, in their rows' order: transport, the time row,
 /// the seek bar, full screen's actions row, the failure's actions.
 const OVERLAY_REWIND: usize = 0;
@@ -127,6 +129,8 @@ pub struct NowPlaying {
     bar_focus: FocusList,
     reorder: Reorder,
     queue_rows: LazyRows,
+    /// The queue header drew its scroll-to-playing button: the playing row was off screen.
+    locate_shown: Rc<Cell<bool>>,
     video_layer: Option<Rc<VideoLayer>>,
     /// The video box as last painted, to report viewport changes to the player.
     video_box: Rc<Cell<(i32, i32)>>,
@@ -195,7 +199,7 @@ impl Render for CachedPart {
                 },
                 PanePart::Queue { large } => v_flex()
                     .size_full()
-                    .child(view.render_queue_header(cx))
+                    .child(view.render_queue_header(window, cx))
                     .child(view.render_queue(large, window, cx))
                     .into_any_element(),
             })
@@ -417,6 +421,7 @@ impl NowPlaying {
             bar_focus: FocusList::new(None),
             reorder: Reorder::new(queue_scroll.clone()),
             queue_rows: LazyRows::new(queue_scroll, QUEUE_ROW_ESTIMATE),
+            locate_shown: Rc::default(),
             video_layer: None,
             video_box,
             audio_only_art,
@@ -1495,9 +1500,12 @@ impl NowPlaying {
             .into_any_element()
     }
 
-    /// "Up next", n of total, then repeat and shuffle.
-    fn render_queue_header(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// "Up next", n of total, scroll to the playing song while it is off screen, then repeat and
+    /// shuffle.
+    fn render_queue_header(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let playback = self.playback.read(cx);
+        let locate = playing_row_off_screen(&self.queue_rows, playback.index, playback.queue.len(), window);
+        self.locate_shown.set(locate);
         let (loop_mode, shuffle) = (playback.nav.loop_mode, playback.nav.shuffle);
         // The JVM displayTotal: the playlist's length while its queue is still loading.
         let total = playback
@@ -1517,6 +1525,16 @@ impl NowPlaying {
             .border_color(theme.border)
             .child(heading("np-up-next", 2, t(Str::UpNext)).font_semibold())
             .child(div().text_sm().text_color(theme.muted_foreground).child(position))
+            .when(locate, |header| {
+                header.child(
+                    self.bar_focus.button(
+                        STOP_LOCATE,
+                        sized_action_icon("np-locate", MaterialIcon::GpsFixed, t(Str::CdScrollToNowPlaying), ICON, HIT)
+                            .on_click(cx.listener(|view, _, window, cx| view.locate_current(window, cx))),
+                        cx,
+                    ),
+                )
+            })
             .child(div().flex_1())
             .child(
                 self.bar_focus.button(
@@ -1555,89 +1573,81 @@ impl NowPlaying {
             .into_any_element()
     }
 
+    /// Scrolls the queue so the playing row lands mid-viewport, as the JVM `rememberLocateCurrent`.
+    fn locate_current(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let index = self.playback.read(cx).index;
+        let Some(visible) = self.queue_rows.visible_rows(window) else { return };
+        self.queue_rows.scroll_to_row(index.saturating_sub(visible.len() / 2), window);
+        cx.notify();
+    }
+
     /// A queue row's ⋮ menu: radio, play next, the video's or the local file's actions, remove.
-    fn queue_item_menu(
-        &self,
-        position: usize,
-        active: bool,
-        item: &QueueItem,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    fn queue_item_menu(&self, position: usize, active: bool, item: &QueueItem, cx: &mut Context<Self>) -> ItemMenu {
         let (playback, view, item) = (self.playback.clone(), cx.entity().downgrade(), item.clone());
         let live_row = item.media_id.is_some_and(|media_id| self.live_row(media_id, cx));
-        let more = sized_action_icon(("np-queue-more", position), MaterialIcon::MoreVert, t(Str::CdMore), ICON, HIT);
-        self.queue_focus
-            .menu_button(position, more, cx)
-            .text_color(cx.theme().muted_foreground)
-            .dropdown_menu_with_anchor(Anchor::TopRight, move |mut menu, _, _| {
-                let video_id = item.video_id().map(str::to_owned);
-                let downloadable = item.downloadable().is_some();
-                if downloadable {
-                    let (radio, item) = (playback.clone(), item.clone());
-                    menu = menu.item(PopupMenuItem::new(t(Str::MenuStartRadio)).on_click(move |_, _, cx| {
+        ItemMenu::new(move |mut menu, _, _| {
+            let video_id = item.video_id().map(str::to_owned);
+            let downloadable = item.downloadable().is_some();
+            if downloadable {
+                let (radio, item) = (playback.clone(), item.clone());
+                menu =
+                    menu.item(PopupMenuItem::new(t(Str::MenuStartRadio)).on_click(move |_, _, cx| {
                         radio.update(cx, |playback, cx| playback.start_radio(item.clone(), cx))
                     }));
-                }
-                if !active {
-                    let next = playback.clone();
-                    menu = menu
-                        .item(PopupMenuItem::new(t(Str::QueueNext)).on_click(move |_, _, cx| {
-                            next.update(cx, |playback, cx| playback.move_next(position, cx))
+            }
+            if !active {
+                let next = playback.clone();
+                menu = menu.item(
+                    PopupMenuItem::new(t(Str::QueueNext))
+                        .on_click(move |_, _, cx| next.update(cx, |playback, cx| playback.move_next(position, cx))),
+                );
+            }
+            match (&video_id, &item.source) {
+                (Some(video_id), _) => {
+                    let id = video_id.clone();
+                    menu = menu.item(PopupMenuItem::new(t(Str::MenuAddToPlaylist)).on_click(move |_, window, cx| {
+                        crate::yt_playlist::AddToPlaylist::open(id.clone(), window, cx)
+                    }));
+                    if downloadable {
+                        let target = DownloadTarget {
+                            video_id: video_id.clone(),
+                            title: item.title.clone(),
+                            thumbnail_url: item.thumb(640).map(|url| url.to_string()),
+                        };
+                        let download = view.clone();
+                        menu = menu.item(PopupMenuItem::new(t(Str::CdDownload)).on_click(move |_, _, cx| {
+                            download.update(cx, |_, cx| cx.emit(NowPlayingEvent::Download(target.clone()))).ok();
                         }));
+                    }
+                    let link = crate::feed::youtube_share_link("video", video_id).unwrap_or_default();
+                    menu = menu.item(PopupMenuItem::new(t(Str::CdShare)).on_click(move |_, window, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(link.clone()));
+                        window.push_notification(t(Str::LinkCopied), cx);
+                    }));
                 }
-                match (&video_id, &item.source) {
-                    (Some(video_id), _) => {
-                        let id = video_id.clone();
+                (None, Source::Local(path)) if live_row => {
+                    if let Some(code) = item.history_code.clone().or_else(|| item.youtube_vid.clone()) {
                         menu =
                             menu.item(PopupMenuItem::new(t(Str::MenuAddToPlaylist)).on_click(move |_, window, cx| {
-                                crate::yt_playlist::AddToPlaylist::open(id.clone(), window, cx)
+                                crate::library_playlist::AddToLocalPlaylist::open(vec![code.clone()], None, window, cx)
                             }));
-                        if downloadable {
-                            let target = DownloadTarget {
-                                video_id: video_id.clone(),
-                                title: item.title.clone(),
-                                thumbnail_url: item.thumb(640).map(|url| url.to_string()),
-                            };
-                            let download = view.clone();
-                            menu = menu.item(PopupMenuItem::new(t(Str::CdDownload)).on_click(move |_, _, cx| {
-                                download.update(cx, |_, cx| cx.emit(NowPlayingEvent::Download(target.clone()))).ok();
-                            }));
-                        }
-                        let link = crate::feed::youtube_share_link("video", video_id).unwrap_or_default();
-                        menu = menu.item(PopupMenuItem::new(t(Str::CdShare)).on_click(move |_, window, cx| {
-                            cx.write_to_clipboard(ClipboardItem::new_string(link.clone()));
-                            window.push_notification(t(Str::LinkCopied), cx);
+                    }
+                    let uri = path.to_string_lossy().into_owned();
+                    for (album, label) in [(false, Str::MenuGoToArtist), (true, Str::MenuGoToAlbum)] {
+                        let (group, uri) = (view.clone(), uri.clone());
+                        menu = menu.item(PopupMenuItem::new(t(label)).on_click(move |_, window, cx| {
+                            group.update(cx, |view, cx| view.go_to_group(album, uri.clone(), window, cx)).ok();
                         }));
                     }
-                    (None, Source::Local(path)) if live_row => {
-                        if let Some(code) = item.history_code.clone().or_else(|| item.youtube_vid.clone()) {
-                            menu = menu.item(PopupMenuItem::new(t(Str::MenuAddToPlaylist)).on_click(
-                                move |_, window, cx| {
-                                    crate::library_playlist::AddToLocalPlaylist::open(
-                                        vec![code.clone()],
-                                        None,
-                                        window,
-                                        cx,
-                                    )
-                                },
-                            ));
-                        }
-                        let uri = path.to_string_lossy().into_owned();
-                        for (album, label) in [(false, Str::MenuGoToArtist), (true, Str::MenuGoToAlbum)] {
-                            let (group, uri) = (view.clone(), uri.clone());
-                            menu = menu.item(PopupMenuItem::new(t(label)).on_click(move |_, window, cx| {
-                                group.update(cx, |view, cx| view.go_to_group(album, uri.clone(), window, cx)).ok();
-                            }));
-                        }
-                    }
-                    (None, _) => {}
                 }
-                let remove = playback.clone();
-                menu.item(
-                    PopupMenuItem::new(t(Str::RemoveFromQueue))
-                        .on_click(move |_, _, cx| remove.update(cx, |playback, cx| playback.remove_at(position, cx))),
-                )
-            })
+                (None, _) => {}
+            }
+            let remove = playback.clone();
+            menu.item(
+                PopupMenuItem::new(t(Str::RemoveFromQueue))
+                    .on_click(move |_, _, cx| remove.update(cx, |playback, cx| playback.remove_at(position, cx))),
+            )
+        })
     }
 
     fn live_row(&self, media_id: i64, cx: &mut Context<Self>) -> bool {
@@ -1783,82 +1793,89 @@ impl NowPlaying {
                         view.reorder.start(position, event.position.y, window, cx);
                     }),
                 );
-            let more = self.queue_item_menu(position, active, item, cx).into_any_element();
+            let menu = self.queue_item_menu(position, active, item, cx);
+            let more =
+                sized_action_icon(("np-queue-more", position), MaterialIcon::MoreVert, t(Str::CdMore), ICON, HIT);
+            let more = self.queue_focus.menu_button(position, more, cx).text_color(theme.muted_foreground);
+            let more = menu.dropdown(more, Anchor::TopRight);
             let row =
                 list_item(h_flex().id(("np-queue-item", position)), position).aria_label(label).aria_selected(active);
             let queue_len = queue.len();
             let row = self.reorder.row(
                 position,
-                self.queue_focus
-                    .item(position, row, cx)
-                    .pl_2()
-                    .pr_4()
-                    .py(px(if large { 10. } else { 8. }))
-                    .gap(px(if large { 12. } else { 8. }))
-                    .items_center()
-                    .cursor_pointer()
-                    .when(active, |row| row.bg(theme.primary.opacity(0.1)))
-                    .map(|row| {
-                        if lifted == Some(position) {
-                            crate::reorder::lift(row, cx)
-                        } else {
-                            row.hover(|style| style.bg(theme.primary.opacity(crate::settings_view::HOVER_ALPHA)))
-                        }
-                    })
-                    .child(handle)
-                    .child(
-                        div()
-                            .size(px(thumb))
-                            .flex_shrink_0()
-                            .rounded(px(6.))
-                            .overflow_hidden()
-                            .bg(theme.secondary)
-                            .when_some(item.display_thumbnail_url(), |frame, url| {
-                                frame.child(
-                                    async_image_of(Some(art_request_sources(&url)))
-                                        .size_full()
-                                        .rounded(px(6.))
-                                        .object_fit(ObjectFit::Cover),
+                on_right_click(
+                    self.queue_focus
+                        .item(position, row, cx)
+                        .px_2()
+                        .py(px(if large { 10. } else { 8. }))
+                        .gap(px(if large { 12. } else { 8. }))
+                        .items_center()
+                        .cursor_pointer()
+                        .when(active, |row| row.bg(theme.primary.opacity(0.1)))
+                        .map(|row| {
+                            if lifted == Some(position) {
+                                crate::reorder::lift(row, cx)
+                            } else {
+                                row.hover(|style| style.bg(theme.primary.opacity(crate::settings_view::HOVER_ALPHA)))
+                            }
+                        })
+                        .child(handle)
+                        .child(
+                            div()
+                                .size(px(thumb))
+                                .flex_shrink_0()
+                                .rounded(px(6.))
+                                .overflow_hidden()
+                                .bg(theme.secondary)
+                                .when_some(item.display_thumbnail_url(), |frame, url| {
+                                    frame.child(
+                                        async_image_of(Some(art_request_sources(&url)))
+                                            .size_full()
+                                            .rounded(px(6.))
+                                            .object_fit(ObjectFit::Cover),
+                                    )
+                                }),
+                        )
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .truncate()
+                                        .font_semibold()
+                                        .when(active, |text| text.text_color(theme.primary))
+                                        .child(item.title.clone()),
                                 )
-                            }),
-                    )
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .truncate()
-                                    .font_semibold()
-                                    .when(active, |text| text.text_color(theme.primary))
-                                    .child(item.title.clone()),
-                            )
-                            .when(!detail.is_empty(), |column| {
-                                column
-                                    .child(div().text_xs().text_color(theme.muted_foreground).truncate().child(detail))
-                            }),
-                    )
-                    .child(more)
-                    .on_key_down(cx.listener(move |view, event: &KeyDownEvent, window, cx| {
-                        let modifiers = &event.keystroke.modifiers;
-                        if !modifiers.alt || modifiers.platform || modifiers.control || modifiers.shift {
-                            return;
-                        }
-                        let target = match event.keystroke.key.as_str() {
-                            "up" => position.checked_sub(1),
-                            "down" => Some(position + 1).filter(|target| *target < queue_len),
-                            _ => return,
-                        };
-                        cx.stop_propagation();
-                        let Some(target) = target else { return };
-                        view.reorder.moved(position, target, cx);
-                        view.playback.update(cx, |playback, cx| playback.move_item(position, target, cx));
-                        window.focus(&view.queue_focus.handle(target, cx), cx);
-                    }))
-                    .on_click(cx.listener(move |view, _, _, cx| {
-                        view.playback.update(cx, |playback, cx| playback.jump_to(position, cx))
-                    })),
+                                .when(!detail.is_empty(), |column| {
+                                    column.child(
+                                        div().text_xs().text_color(theme.muted_foreground).truncate().child(detail),
+                                    )
+                                }),
+                        )
+                        .child(more)
+                        .on_key_down(cx.listener(move |view, event: &KeyDownEvent, window, cx| {
+                            let modifiers = &event.keystroke.modifiers;
+                            if !modifiers.alt || modifiers.platform || modifiers.control || modifiers.shift {
+                                return;
+                            }
+                            let target = match event.keystroke.key.as_str() {
+                                "up" => position.checked_sub(1),
+                                "down" => Some(position + 1).filter(|target| *target < queue_len),
+                                _ => return,
+                            };
+                            cx.stop_propagation();
+                            let Some(target) = target else { return };
+                            view.reorder.moved(position, target, cx);
+                            view.playback.update(cx, |playback, cx| playback.move_item(position, target, cx));
+                            window.focus(&view.queue_focus.handle(target, cx), cx);
+                        }))
+                        .on_click(cx.listener(move |view, _, _, cx| {
+                            view.playback.update(cx, |playback, cx| playback.jump_to(position, cx))
+                        })),
+                    Some(&menu),
+                ),
             );
             row.into_any_element()
         });
@@ -1871,6 +1888,18 @@ impl NowPlaying {
                 }
             }),
         );
+        let (rows, locate_shown, queue_len) = (self.queue_rows.clone(), self.locate_shown.clone(), queue.len());
+        // The header renders before the list lays out; a scroll that changes its answer redraws it.
+        let locate_check = canvas(
+            move |_, window, _| {
+                if playing_row_off_screen(&rows, index, queue_len, window) != locate_shown.get() {
+                    window.request_animation_frame();
+                }
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .size_0();
         div()
             .id("np-queue")
             .flex_1()
@@ -1878,6 +1907,7 @@ impl NowPlaying {
             .overflow_y_scroll()
             .track_scroll(&self.queue_scroll)
             .child(list)
+            .child(locate_check)
             .children(self.render_queue_more(cx))
             .child(tracker)
             .into_any_element()
@@ -2033,4 +2063,10 @@ impl Render for NowPlaying {
             )
             .into_any_element()
     }
+}
+
+/// No part of the playing row `index` is on screen; false while the queue has no playing row or has
+/// not been laid out.
+fn playing_row_off_screen(rows: &LazyRows, index: usize, queue_len: usize, window: &Window) -> bool {
+    index < queue_len && rows.visible_rows(window).is_some_and(|visible| !visible.contains(&index))
 }

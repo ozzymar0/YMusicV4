@@ -21,6 +21,7 @@ import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Cancel
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.outlined.FileDownload
@@ -36,7 +37,6 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -61,6 +61,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.ymusic.download.DownloadFolderAccessException
 import io.ymusic.download.DownloadFormat
 import io.ymusic.download.DownloadService
@@ -82,6 +83,10 @@ import io.ymusic.ui.resources.downloads_action_pause
 import io.ymusic.ui.resources.downloads_action_resume
 import io.ymusic.ui.resources.downloads_action_reveal_library
 import io.ymusic.ui.resources.downloads_action_select
+import io.ymusic.ui.resources.downloads_cancel_selected
+import io.ymusic.ui.resources.downloads_cancel_selected_keep
+import io.ymusic.ui.resources.downloads_cancel_selected_message
+import io.ymusic.ui.resources.downloads_cancel_selected_title
 import io.ymusic.ui.resources.downloads_completed_date
 import io.ymusic.ui.resources.downloads_empty_all
 import io.ymusic.ui.resources.downloads_empty_completed
@@ -170,7 +175,7 @@ fun DownloadsScreen(graph: AppGraph, coordinator: PlaybackCoordinator) {
             graph.logger?.fork("downloads")?.captureUnlessEnvironmental(e, "download list failed to load")
             loadError = e.errorCode() ?: "E70081"
         }
-    }.collectAsState(emptyList())
+    }.collectAsStateWithLifecycle(emptyList())
     loadError?.let { code ->
         ErrorState(code) {
             loadError = null
@@ -271,6 +276,12 @@ fun DownloadsScreen(graph: AppGraph, coordinator: PlaybackCoordinator) {
                 pending.taskIds.forEach(service::remove)
                 finish(pending.taskIds.toSet())
             }
+            is SelectionConfirm.Cancel -> CancelSelectedDialog(pending.taskIds.size, onDismiss = dismiss) {
+                // Re-read the states: a task that finished or failed while the dialog was up keeps its result.
+                val cancelable = visible.filter { it.id in pending.taskIds && it.state.isCancelable }.map { it.id }
+                cancelable.forEach(service::cancel)
+                finish(cancelable.toSet())
+            }
             is SelectionConfirm.Delete -> DeleteSelectedFilesDialog(
                 graph,
                 pending.targets,
@@ -288,6 +299,7 @@ fun DownloadsScreen(graph: AppGraph, coordinator: PlaybackCoordinator) {
         val retryable = selectedTasks.filter {
             it.state == DownloadState.FAILED && retryRoute(it, canPickFolder, signIn) == RetryRoute.Direct
         }
+        val cancelable = selectedTasks.filter { it.state.isCancelable }
         DownloadSelectionBar(
             count = selection.size,
             allSelected = multiSelection.allSelected(shownIds),
@@ -310,6 +322,7 @@ fun DownloadsScreen(graph: AppGraph, coordinator: PlaybackCoordinator) {
                     endSelection()
                 }
             },
+            onCancel = if (cancelable.isEmpty()) null else ({ confirming = SelectionConfirm.Cancel(cancelable.map { it.id }) }),
             onRemove = { confirming = SelectionConfirm.Remove(selectedTasks.map { it.id }) },
             onDelete = if (deletableItems.isEmpty()) null else ({ confirming = SelectionConfirm.Delete(deletableItems) }),
         )
@@ -439,10 +452,11 @@ private fun retryRoute(task: DownloadTask, canPickFolder: Boolean, signIn: SignI
 /** A selection action waiting on its confirm dialog, over the tasks it was opened for. */
 private sealed interface SelectionConfirm {
     class Remove(val taskIds: List<String>) : SelectionConfirm
+    class Cancel(val taskIds: List<String>) : SelectionConfirm
     class Delete(val targets: Map<String, MediaStoreItem>) : SelectionConfirm
 }
 
-/** The selection mode's app bar: close · "N selected" · select all · pause · resume · ⋮ (remove, delete). */
+/** The selection mode's app bar: close · "N selected" · select all · pause · resume · cancel · ⋮ (remove, delete). */
 @Composable
 private fun DownloadSelectionBar(
     count: Int,
@@ -451,6 +465,7 @@ private fun DownloadSelectionBar(
     onToggleSelectAll: () -> Unit,
     onPause: (() -> Unit)?,
     onResume: (() -> Unit)?,
+    onCancel: (() -> Unit)?,
     onRemove: () -> Unit,
     onDelete: (() -> Unit)?,
 ) {
@@ -459,6 +474,7 @@ private fun DownloadSelectionBar(
     SelectionBar(count, allSelected, onClose, onToggleSelectAll) {
         onPause?.let { ActionIcon(Icons.Filled.Pause, stringResource(Res.string.downloads_action_pause), onClick = it) }
         onResume?.let { ActionIcon(Icons.Filled.PlayArrow, stringResource(Res.string.downloads_action_resume), onClick = it) }
+        onCancel?.let { ActionIcon(Icons.Filled.Cancel, stringResource(Res.string.downloads_cancel_selected), onClick = it) }
         MoreMenu(ItemActions(listOfNotNull(removeLabel to onRemove, onDelete?.let { deleteLabel to it })), inFocusableItem = false)
     }
 }
@@ -514,6 +530,30 @@ private fun RemoveSelectedDialog(count: Int, onDismiss: () -> Unit, onConfirm: (
         )
     }
 }
+
+@Composable
+private fun CancelSelectedDialog(count: Int, onDismiss: () -> Unit, onConfirm: () -> Unit) {
+    ElevatedBarDialog(
+        title = pluralText(Res.plurals.downloads_cancel_selected_title, count, count),
+        onDismiss = onDismiss,
+        canScrollBackward = false,
+        canScrollForward = false,
+        buttons = {
+            DialogSecondaryButton(stringResource(Res.string.downloads_cancel_selected_keep), onClick = onDismiss)
+            TextButton(onClick = onConfirm) { Text(stringResource(Res.string.downloads_cancel_selected)) }
+        },
+    ) {
+        Text(
+            stringResource(Res.string.downloads_cancel_selected_message),
+            style = MaterialTheme.typography.bodyMedium,
+            color = DesignColors.Ink,
+            modifier = Modifier.padding(horizontal = DesignSpacing.Space24, vertical = DesignSpacing.Space16),
+        )
+    }
+}
+
+/** The states a card's ⋮ offers Cancel in. */
+private val DownloadState.isCancelable: Boolean get() = isActive || this == DownloadState.PAUSED
 
 /** The filter chips, in display order. CANCELED matches none (it's filtered out of the screen). */
 private enum class DownloadFilter(val label: StringResource, val empty: StringResource) {

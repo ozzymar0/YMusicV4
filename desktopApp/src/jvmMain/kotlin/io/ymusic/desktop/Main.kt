@@ -82,6 +82,7 @@ import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.WindowPosition
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.sun.jna.Native
 import io.sentry.kotlin.multiplatform.Sentry
 import io.ymusic.desktop.media.MacDock
@@ -249,6 +250,7 @@ import kotlin.math.ceil
 import kotlin.math.floor
 import kotlin.math.min
 import kotlin.math.roundToInt
+import kotlin.system.exitProcess
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 import java.awt.Color as AwtColor
@@ -257,14 +259,26 @@ import java.awt.Color as AwtColor
  * The desktop shell: boots the scraping engine, assembles the [AppGraph] (player facade over ffmpeg
  * local + MSE YouTube playback), and runs the shared [App].
  */
-private val logStore = LogStore(jvmLogDatabaseDriver(File(ymusicDataDir().apply { mkdirs() }, "logs.db").path))
+private val dataDirSetup: Result<DataDirSetup> = runCatching { prepareDataDir(ymusicDataDir()) }
 
-// The app log + Sentry events (no-op when Sentry wasn't initialized), and stdout in debug builds only.
-private val rootLogger: Logger =
-    TeeLogger(
-        DbLogger(logStore),
-        if (DEBUG_BUILD) TeeLogger(SentryLogger(), StdoutLogger()) else SentryLogger(),
-    ).also { it.bindMseNativeLogs() }
+// Sentry events (no-op when Sentry wasn't initialized), and stdout in debug builds only.
+private val consoleLogger: Logger = if (DEBUG_BUILD) TeeLogger(SentryLogger(), StdoutLogger()) else SentryLogger()
+
+private val logStore: LogStore = openLogStore()
+
+// The app log + the console logger.
+private val rootLogger: Logger = TeeLogger(DbLogger(logStore), consoleLogger).also { it.bindMseNativeLogs() }
+
+/** The app log in logs.db; in memory for this launch when that file cannot be opened. */
+private fun openLogStore(): LogStore {
+    val log = consoleLogger.fork("data-dir")
+    return try {
+        openDatabase(File(ymusicDataDir(), "logs.db"), log) { LogStore(jvmLogDatabaseDriver(it.path)) }
+    } catch (e: Exception) {
+        log.log(Logger.Level.WARN, "E92005 the app log (logs.db) did not open: lines are kept in memory only", e)
+        LogStore(jvmLogDatabaseDriver(":memory:"))
+    }
+}
 
 private val LOG_FLUSH_TIMEOUT = 3.seconds
 
@@ -294,6 +308,13 @@ private var mainWindow: Frame? = null
 fun main(args: Array<String>) {
     if (isWindows) WindowsAppId.claim(rootLogger.fork("app-id"))
     defaultLinuxSoftwareRendering()
+    dataDirSetup
+        .onSuccess { it.report(ymusicDataDir(), rootLogger.fork("data-dir")) }
+        .onFailure { error ->
+            dataDirUnusable(ymusicDataDir(), error, rootLogger.fork("data-dir"))
+            flushLogBeforeExit()
+            exitProcess(1)
+        }
     // The log moved to logs.db: the text log files of older builds go.
     File(ymusicDataDir(), "logs").listFiles { file -> file.name.startsWith("ymusic.log") }?.forEach { it.delete() }
     val launchFiles = launchFileUris(args.toList())
@@ -483,6 +504,7 @@ fun main(args: Array<String>) {
         }
         LaunchedEffect(windowVisible, windowState.isMinimized) {
             videoUnderlay.shown = windowVisible && !windowState.isMinimized
+            QuickJsRuntime.timersInBackground = !windowVisible || windowState.isMinimized
         }
         // Out of sight, video plays as audio only; the quality comes back with the window.
         LaunchedEffect(graph, windowVisible, windowState.isMinimized) {
@@ -925,7 +947,10 @@ private suspend fun buildGraph(
         logger = rootLogger,
         ioDispatcher = Dispatchers.IO,
     )
-    val engineCache = desktopEngineCacheStore(File(session.cacheRoot, ENGINE_CACHE_DIR), rootLogger)
+    val engineCacheDir = File(session.cacheRoot, ENGINE_CACHE_DIR)
+    val engineCache = openDatabase(File(engineCacheDir, "engine-cache.db"), rootLogger.fork("data-dir")) {
+        desktopEngineCacheStore(engineCacheDir, rootLogger)
+    }
     val engines = withContext(Dispatchers.IO) {
         DynamicEngineManager(
             http.engine,
@@ -948,12 +973,12 @@ private suspend fun buildGraph(
     engines.start()
 
     val mediaStore = withContext(Dispatchers.IO) {
-        BetterMediaStore.create(mediaStoreJdbcDriver(File(dataDir, "media-store.db").absolutePath))
+        openDatabase(File(dataDir, "media-store.db"), rootLogger.fork("data-dir")) {
+            BetterMediaStore.create(mediaStoreJdbcDriver(it.absolutePath))
+        }
     }
 
-    // Thumbnails: everything is a fetcher — http on a cache-less client (originals stream to the
-    // fetcher's disk cache, decode from file) + local files + ffmpeg-extracted embedded art
-    // (absent ffmpeg just keeps art:// urls unresolved → placeholder boxes).
+    // Without ffmpeg no fetcher takes art:// at all, so every art:// url (even art://yt) shows the view's placeholder.
     val imageNetworkFetcher = networkFetcher(
         http.image,
         FileSystem.SYSTEM,
@@ -969,7 +994,9 @@ private suspend fun buildGraph(
                     FfmpegMetadataGetter(it),
                     mediaStore,
                     loaderYoutubeArt { checkNotNull(loaderRef) },
+                    rootLogger.fork("local-art"),
                     coverCache = ImageSourceCache(FileSystem.SYSTEM, File(dataDir, "image-cover-cache").absolutePath.toPath(), 64L * 1024 * 1024),
+                    extractorVersion = APP_VERSION_CODE.toString(),
                 )
             },
         ),
@@ -1091,10 +1118,9 @@ private suspend fun buildGraph(
                 FfmpegMetadataExtractor(FfmpegMetadataGetter(it)),
             )
         }
-        val store = io.ymusic.download.DownloadStore(
-            io.ymusic.download.downloadDatabaseJdbcDriver("jdbc:sqlite:${File(dataDir, "downloads.db").absolutePath}"),
-            rootLogger,
-        )
+        val store = openDatabase(File(dataDir, "downloads.db"), rootLogger.fork("data-dir")) {
+            io.ymusic.download.DownloadStore(io.ymusic.download.downloadDatabaseJdbcDriver("jdbc:sqlite:${it.absolutePath}"), rootLogger)
+        }
         val sabrClient = KmpHttpClient.create {
             defaultExecuteTimeout = APP_HTTP_TIMEOUT
             logger = rootLogger.fork("kmphttp")
@@ -1111,10 +1137,9 @@ private suspend fun buildGraph(
         }
         // Own segment index (byte range per segment) → SABR resume across pause/re-attest. Separate from
         // the player cache DB: downloads store bytes in their own file, not the player blob cache.
-        val segmentIndex = SqlDelightSegmentIndex(
-            jvmSegmentDatabaseDriver("jdbc:sqlite:${File(dataDir, "download-segments.db").absolutePath}"),
-            now = { System.currentTimeMillis() },
-        )
+        val segmentIndex = openDatabase(File(dataDir, "download-segments.db"), rootLogger.fork("data-dir")) {
+            SqlDelightSegmentIndex(jvmSegmentDatabaseDriver("jdbc:sqlite:${it.absolutePath}"), now = { System.currentTimeMillis() })
+        }
         io.ymusic.download.DownloadService(
             store = store,
             scope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
@@ -1175,10 +1200,12 @@ private suspend fun buildGraph(
         logger = rootLogger,
         playerCache = playerCache,
         mediaStore = mediaStore,
-        playHistory = PlayHistoryStore(playHistoryJdbcDriver(File(dataDir, "play-history.db").absolutePath)),
-        sponsorBlockStore = SqliteSponsorBlockStore(
-            sponsorBlockJdbcDriver(File(dataDir, "sponsor-block.db").absolutePath),
-        ),
+        playHistory = openDatabase(File(dataDir, "play-history.db"), rootLogger.fork("data-dir")) {
+            PlayHistoryStore(playHistoryJdbcDriver(it.absolutePath))
+        },
+        sponsorBlockStore = openDatabase(File(dataDir, "sponsor-block.db"), rootLogger.fork("data-dir")) {
+            SqliteSponsorBlockStore(sponsorBlockJdbcDriver(it.absolutePath))
+        },
         scanLibraryFolder = { onProgress -> scanPickedFolder(mediaStore, onProgress) },
         libraryFolderPicker = { pickAndRegisterFolder(mediaStore) },
         canWriteFolder = { uri -> File(Uri.parse(uri).filePath()).let { it.isDirectory && it.canWrite() } },
@@ -1271,8 +1298,8 @@ private fun DesktopPlayerSurface(
     playbackStatus: kotlinx.coroutines.flow.StateFlow<PlaybackStatus>,
     modifier: Modifier,
 ) {
-    val status by playbackStatus.collectAsState()
-    val windowResizingNow by windowResizing.collectAsState()
+    val status by playbackStatus.collectAsStateWithLifecycle()
+    val windowResizingNow by windowResizing.collectAsStateWithLifecycle()
     LaunchedEffect(status.playWhenReady, windowResizingNow) {
         if (status.playWhenReady && !windowResizingNow) videoPanel.setCovered(false)
     }

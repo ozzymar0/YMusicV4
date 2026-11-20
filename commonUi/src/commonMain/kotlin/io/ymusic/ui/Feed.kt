@@ -41,7 +41,6 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
@@ -57,6 +56,7 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.ymusic.download.StillProcessingException
 import io.ymusic.dynamicengine.yt.YtChip
 import io.ymusic.dynamicengine.yt.YtFeedItem
@@ -365,7 +365,7 @@ fun FeedList(
     listState: LazyListState? = null,
     onDeeplink: ((link: String, title: String?) -> Unit)? = null,
 ) {
-    val state by pager.state.collectAsState()
+    val state by pager.state.collectAsStateWithLifecycle()
     // Pull-to-refresh / F5 reloads the surface from the top: drop any chip filter and take the
     // server's default first response, keeping the current list on screen until the new page lands.
     val reload = { pager.reload() }
@@ -833,7 +833,7 @@ internal val LocalRemoveFromTopTracks = compositionLocalOf<((YtFeedItem) -> Unit
 @Composable
 private fun itemActions(item: YtFeedItem, coordinator: PlaybackCoordinator): ItemActions {
     val downloadLauncher = LocalDownloadLauncher.current
-    val quickPreset = downloadLauncher?.quickPreset?.collectAsState()?.value
+    val quickPreset = downloadLauncher?.quickPreset?.collectAsStateWithLifecycle()?.value
     val removeFromTopTracks = LocalRemoveFromTopTracks.current
     val ytPlaylists = LocalYtPlaylistActions.current
     val removeFromYtPlaylist = LocalRemoveFromYtPlaylist.current
@@ -1046,22 +1046,26 @@ internal fun rankMusicFirst(items: List<YtFeedItem>): List<YtFeedItem> {
 /** The three feed layout bands a surface width falls into. */
 internal enum class FeedLayout { SquareList, WideList, Grid }
 
-/** The ONE place the feed breakpoints live: square list under 320dp, 16:9 list to 469dp, then the
- *  grid ([gridColumnsFor] columns). */
+/** Where the grid starts: two [GRID_CARD_MIN_WIDTH] cards fit at the compact margin and gutter. */
+internal val FEED_GRID_MIN_WIDTH: androidx.compose.ui.unit.Dp =
+    GRID_CARD_MIN_WIDTH * 2 + DesignSpacing.Space8 + DesignSpacing.MarginCompact * 2
+
+/** The ONE place the feed breakpoints live: square list under 320dp, 16:9 list below
+ *  [FEED_GRID_MIN_WIDTH], then the grid ([gridColumnsFor] columns). */
 internal fun feedLayoutFor(width: androidx.compose.ui.unit.Dp): FeedLayout = when {
     width < 320.dp -> FeedLayout.SquareList
-    width < 470.dp -> FeedLayout.WideList
+    width < FEED_GRID_MIN_WIDTH -> FeedLayout.WideList
     else -> FeedLayout.Grid
 }
 
 /** Feed list rows under 380dp use [ListTitleCompactStyle]. */
 internal fun feedCompactTitleFor(width: androidx.compose.ui.unit.Dp): Boolean = width < 380.dp
 
-/** Max-item-width model: the FEWEST columns (≥2) keeping every card ≤ [GRID_CARD_MAX_WIDTH], with
- *  the gutter between columns counted. Cards shrink toward the next column, never past the max. */
+/** Min-item-width model: the MOST columns (≥2) keeping every card ≥ [GRID_CARD_MIN_WIDTH], with
+ *  the gutter between columns counted. Cards grow toward the next column, never below the min. */
 internal fun gridColumnsFor(width: androidx.compose.ui.unit.Dp): Int {
     val metrics = gridMetricsFor(width)
-    return kotlin.math.ceil((width - metrics.margin * 2 + metrics.gutter) / (GRID_CARD_MAX_WIDTH + metrics.gutter))
+    return kotlin.math.floor((width - metrics.margin * 2 + metrics.gutter) / (GRID_CARD_MIN_WIDTH + metrics.gutter))
         .toInt()
         .coerceAtLeast(2)
 }
