@@ -22,6 +22,7 @@ use ym_store::MediaStore;
 
 use crate::cookie_session::{CookieSession, ENGINE_CACHE_DIR, HTTP_CACHE_DIR, SealedJar};
 use crate::downloads::DownloadInputs;
+use crate::download_index::AudioIndex;
 use crate::offline_playlists::OfflinePlaylists;
 use crate::youtube_session::{CandidateSource, YoutubeSessions};
 
@@ -69,6 +70,7 @@ pub struct AppGraph {
     /// The player's media cache (`player-cache`); `None` when it could not be opened.
     pub player_cache: Option<Arc<ym_ytmedia::cache::MediaCache>>,
     pub downloads: DownloadService,
+    pub offline_downloads: AudioIndex,
     pub offline_playlists: Arc<OfflinePlaylists>,
     pub history: Arc<ym_history::PlayHistory>,
     /// Files opened from outside the Library (Open with), kept out of Play again for the process.
@@ -260,6 +262,9 @@ impl AppGraph {
             .map_err(|error| boot_error("R90015", "downloads")(error.to_string()))?
             .map_err(boot_error("R90015", "downloads"))?;
 
+        let offline_downloads =
+            crate::download_index::start(downloads.clone(), &tokio, log.fork("offline-download-index"));
+
         let history_path = data_dir.join("play-history.db");
         let history = Arc::new(
             tokio::task::spawn_blocking(move || ym_history::PlayHistory::open(&history_path))
@@ -308,6 +313,7 @@ impl AppGraph {
             youtube,
             player_cache,
             downloads,
+            offline_downloads,
             offline_playlists: Arc::new(OfflinePlaylists::new(data_dir.join("offline-playlists"))),
             history,
             temporary_uris: Arc::default(),
