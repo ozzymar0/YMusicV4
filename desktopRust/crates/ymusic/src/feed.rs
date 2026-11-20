@@ -9,7 +9,7 @@ use gpui_kit::component::{ActiveTheme, Disableable, Icon, Selectable, Sizable, S
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use ym_common::log::Logger;
-use ym_engine::yt::{YtFeedItem, YtFeedPage, YtFilterGroup, YtPageHeader, YtSectionHeader};
+use ym_engine::yt::{YtFeedItem, YtFeedPage, YtFilterGroup, YtPageHeader, YtSection, YtSectionHeader};
 use ym_engine::{DynamicEngine, EngineError, ErrorKind};
 use ym_i18n::{Str, t, tf};
 use ym_image_loader::async_image::async_image_of;
@@ -302,6 +302,8 @@ pub struct FeedView {
     expanded: std::collections::HashSet<usize>,
     /// A header action (save, subscribe) is running.
     header_busy: bool,
+    /// A user-initiated fetch of all playlist pages for durable offline browsing.
+    offline_saving: bool,
     /// Every item's focus stop, by its index across all sections.
     focus: FocusList,
     /// Section header and Show more buttons, three per section.
@@ -369,6 +371,7 @@ impl FeedView {
             scroll: scroll.clone(),
             expanded: std::collections::HashSet::new(),
             header_busy: false,
+            offline_saving: false,
             focus: FocusList::new(Some(scroll.clone())),
             controls: FocusList::new(Some(scroll.clone())),
             chips: FocusList::new(Some(scroll.clone())),
@@ -477,6 +480,81 @@ impl FeedView {
                     .or_else(|| header.channel_id.as_ref().map(|id| format!("https://www.youtube.com/channel/{id}")))
             }
         }
+    }
+
+    /// Fetch every page before overwriting the saved offline playlist. The previous snapshot
+    /// survives an error halfway through pagination. Audio files remain device-specific and are
+    /// never copied or downloaded by this metadata-only action.
+    fn save_entire_playlist_offline(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.offline_saving {
+            return;
+        }
+        let Some(url) = self.playlist_url() else { return };
+        let graph = cx.global::<AppGraph>();
+        let account = if graph.guest { String::new() } else {
+            graph.settings.string(ACCOUNT_KEY, "").unwrap_or_default()
+        };
+        if account.is_empty() {
+            window.push_notification("Sign in to save your playlists for offline browsing.", cx);
+            return;
+        }
+        let (engine, store, log) =
+            (graph.engine(), graph.offline_playlists.clone(), graph.log.fork("playlist-offline-save"));
+        self.offline_saving = true;
+        cx.notify();
+        let job = on_core(cx, async move {
+            let first = engine.playlist_detail(&url, None, &log).await?;
+            let mut videos: Vec<YtFeedItem> = first.sections.iter()
+                .flat_map(|section| section.items.iter())
+                .filter(|item| item.kind == "video")
+                .cloned().collect();
+            let mut continuation = first.continuation.clone().filter(|token| !token.is_empty());
+            let mut seen = std::collections::HashSet::new();
+            let mut pages = 1;
+            while let Some(token) = continuation {
+                if pages >= 300 || videos.len() > 20_000 || !seen.insert(token.clone()) {
+                    return Err(EngineError::site(
+                        "R92150",
+                        "Playlist pagination could not finish; the previous offline copy was preserved.",
+                    ));
+                }
+                let page = engine.playlist_detail(&url, Some(&token), &log).await?;
+                videos.extend(page.sections.into_iter().flat_map(|section| section.items)
+                    .filter(|item| item.kind == "video"));
+                continuation = page.continuation.filter(|next| !next.is_empty());
+                pages += 1;
+            }
+            if videos.len() > 20_000 {
+                return Err(EngineError::site("R92151", "Playlist exceeds the offline limit of 20,000 videos."));
+            }
+            let count = videos.len();
+            let combined = YtFeedPage {
+                sections: vec![YtSection { items: videos, ..Default::default() }],
+                continuation: None,
+                page_header: first.page_header,
+                ..Default::default()
+            };
+            tokio::task::spawn_blocking(move || store.save_page(&account, &url, &combined, None))
+                .await
+                .map_err(|error| EngineError::site("R92152", error.to_string()))?
+                .map_err(|error| EngineError::site("R92153", error.to_string()))?;
+            Ok(count)
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = job.await;
+            this.update_in(cx, |view, window, cx| {
+                view.offline_saving = false;
+                match result {
+                    Some(Ok(count)) => window.push_notification(
+                        format!("Saved {count} playlist entries for offline browsing (audio downloads are separate)."),
+                        cx,
+                    ),
+                    Some(Err(error)) => window.push_notification(error_text(&error), cx),
+                    None => {}
+                }
+                cx.notify();
+            }).ok();
+        }).detach();
     }
 
     /// Saves the playlist to (or removes it from) the account library.
@@ -965,6 +1043,19 @@ impl FeedView {
                 view.open_playlist_dialog(false, window, cx);
             }));
         actions = actions.child(self.actions.button(ACTION_DOWNLOAD, download, cx));
+        if self.playlist_url().is_some() {
+            actions = actions.child(if self.offline_saving {
+                Spinner::new().into_any_element()
+            } else {
+                let offline = action_icon(
+                    "playlist-save-offline",
+                    MaterialIcon::FileDownloadOutlined,
+                    "Save complete playlist list offline (metadata only; audio downloads are separate)",
+                )
+                .on_click(cx.listener(|view, _, window, cx| view.save_entire_playlist_offline(window, cx)));
+                self.actions.button(ACTION_OFFLINE, offline, cx).into_any_element()
+            });
+        }
         let local = action_icon("playlist-local", MaterialIcon::LibraryAddOutlined, t(Str::LocalPlaylistCreate))
             .disabled(!has_videos)
             .on_click(cx.listener(|view, _, window, cx| {
@@ -1171,6 +1262,7 @@ const ACTION_SHUFFLE_ALL: usize = 7;
 const ACTION_RELOAD: usize = 8;
 const ACTION_SEARCH: usize = 9;
 const ACTION_RETRY_MORE: usize = 10;
+const ACTION_OFFLINE: usize = 11;
 /// The page's Show more, after any chip.
 const CHIPS_SHOW_MORE: usize = 64;
 const ROW_GAP: f32 = 16.;
