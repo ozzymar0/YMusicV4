@@ -41,7 +41,7 @@ class OfflinePlaylistSnapshotStore(
     }
 
     /** Playlists saved on this device, for the account tab when the network is unavailable. */
-    suspend fun list(accountId: String): List<OfflinePlaylistLink> = withContext(Dispatchers.IO) {
+    internal suspend fun list(accountId: String): List<OfflinePlaylistLink> = withContext(Dispatchers.IO) {
         if (accountId.isBlank()) return@withContext emptyList()
         lock.withLock {
             fileSystem.listOrNull(directory).orEmpty().asSequence()
