@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - ci/ios-unsigned-ipa
+      - feature/unified-offline-library
   workflow_dispatch:
 
 permissions:
