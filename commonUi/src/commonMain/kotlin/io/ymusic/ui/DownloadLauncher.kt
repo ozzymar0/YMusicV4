@@ -103,7 +103,8 @@ internal fun DownloadDialogHost(graph: AppGraph, pending: YtFeedItem?, onDismiss
     val alreadyDownloaded = video.id in LocalAvailableOffline.current
     var confirming by remember(video.id) { mutableStateOf(false) }
     val onDownload = { if (alreadyDownloaded) confirming = true else start() }
-    val onPickLocation: () -> Unit = { scope.launch { pickDownloadFolder(graph, snackbar, scans) } }
+    val onPickLocation: (() -> Unit)? =
+        if (graph.libraryFolderPicker == null) null else ({ scope.launch { pickDownloadFolder(graph, snackbar, scans) } })
     val onRetry: () -> Unit = { scope.launch { state.load(log) } }
     val signIn = LocalSignInResolver.current?.takeIf { !it.signedIn }
     val onSignIn: (() -> Unit)? = signIn?.let { resolver ->
