@@ -28,7 +28,9 @@ On iOS, **Remove from disk** invokes `DownloadService.deleteFinishedFile`. It on
 
 A successful YouTube playlist detail fetch writes the playable video entries (video IDs, titles, artwork references and order) to an account-scoped JSON snapshot in Application Support. Continuation pages append to that snapshot. Failed network fetches fall back to a matching saved playlist; previously saved playlists are also listed in the Account tab if the startup account probe cannot connect. The account ID is the last confirmed YouTube channel ID, cleared on explicit sign-out or account switch. Cached mutation tokens are never used, and an online fetch remains authoritative.
 
-This is **device-local metadata caching**, not a synchronized offline database. Playlists must have been opened online at least once on each device to be available offline. Windows Rust still needs an equivalent persistent offline playlist browser; its current custom code only provides local-first playback for entries in a loaded cloud playlist.
+Windows Rust also saves successfully loaded playlist pages as JSON under the application's existing data directory. Its account feed can fall back to locally stored playlist links when YouTube is unreachable; the playlist detail feed can fall back to saved ordered song entries. The cache follows the same per-channel-ID isolation and is cleared from account access on explicit logout or account switch. The Rust store preserves duplicate video entries, never persists server-side removal tokens, and does not move audio files.
+
+This is **device-local metadata caching**, not a synchronized offline database. Each playlist must have been opened online at least once on that device to be available offline. Both platforms re-fetch authenticated cloud playlist pages on successful online requests; they cannot invent songs from playlists never previously loaded.
 
 ## Data-preservation rules
 
@@ -36,7 +38,7 @@ No existing `downloads.db`, local `media-store.db`, cookie jar or playlist has b
 
 ## Known limitations — not yet implemented
 
-1. **Offline playlist browsing is partial.** The Kotlin/iOS app caches previously visited playlist entries and exposes those snapshots when YouTube cannot be reached, but Windows Rust has no corresponding persistent playlist-browser cache yet. Unvisited playlists cannot be opened offline.
+1. **Offline playlist browsing remains limited to previously visited playlists.** Kotlin/iOS and Rust/Windows now persist device-local, account-scoped snapshots and fall back to them on failed network requests. An unvisited playlist, or items beyond previously loaded pagination, are not available offline. Automatic refresh/merging of fully paginated snapshots with changing server lists needs additional verification.
 2. **Full bidirectional playlist editing has not been verified.** Existing authentication/engine code supports cloud feed retrieval, add and create operations. Delete, reorder, rename and multi-device propagation still need integration and live-account tests.
 3. **Network reachability is not yet part of queue source selection.** A missing local copy falls back to the YouTube player, whose network error handling applies even when fully offline.
 4. **Kotlin queues resolve existing downloaded files at construction/page-load time, not before every next-track load.** A file removed during an active queue may cause a local file-missing error. Rust re-resolves on each load.
@@ -52,7 +54,7 @@ CI workflows on this branch:
 - `.github/workflows/library-checks.yml`: Kotlin shared tests on Ubuntu, Rust media store tests and Windows desktop compilation on Windows 2025.
 - `.github/workflows/upstream-updates.yml` on `master`: scheduled/manual upstream proposal using a disposable branch and a draft PR; no automatic merge. Upstream workflow-file changes are separately reported when the Actions token cannot push them.
 
-Tests in `UnifiedOfflineSelectionTest` cover playlist identity, device-local copy priority, stream fallback, unavailable-offline policy, completed-vs-paused/video-only records, missing copies, deduplication and post-removal membership. Rust playback tests cover preserving the video ID and stream fallback.
+Tests in `UnifiedOfflineSelectionTest` cover playlist identity, device-local copy priority, stream fallback, unavailable-offline policy, completed-vs-paused/video-only records, missing copies, deduplication and post-removal membership. Kotlin snapshot tests cover order, repeated video IDs, continuation appending, replacement on server refresh, and account isolation. Rust playback and snapshot tests cover cloud identity, missing-file fallback, cached playlist order and isolation. Tests may not pass until CI compilation and runtime dependencies are confirmed.
 
 **CI status is determined by GitHub Actions, not by this document.** Do not mark the modified app as working until both relevant jobs and the final IPA artifact pass.
 
