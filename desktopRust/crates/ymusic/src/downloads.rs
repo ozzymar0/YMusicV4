@@ -304,17 +304,47 @@ pub fn offer_download_location(folder: ym_store::Bucket, window: &mut Window, cx
         .open(window, cx, move |_, cx| save_download_folder(&path, cx));
 }
 
-/// Video ids already saved: Library files tagged with their YouTube id (the JVM
-/// `rememberAvailableOffline`, `store.youtubeVideoIds()`).
+/// Video IDs backed by an actual readable audio file *on this device*. A stale Library
+/// database row, a video-only download or an unfinished task must not claim a song is offline.
+/// Scan both sources: downloads that finished before the metadata scanner registered them still
+/// count, and imported Library files can count without ever having a download task.
 pub fn offline_ids(cx: &App) -> impl Future<Output = HashSet<String>> + use<> {
     let graph = cx.global::<AppGraph>();
-    let (media, log) = (graph.media.clone(), graph.log.fork("available-offline"));
+    let (media, downloads, log) =
+        (graph.media.clone(), graph.downloads.clone(), graph.log.fork("available-offline"));
     let load = on_core(cx, async move {
         let mut ids = HashSet::new();
-        match tokio::task::spawn_blocking(move || media.youtube_video_ids()).await {
-            Ok(Ok(library)) => ids.extend(library),
-            Ok(Err(error)) => log.warn("library video ids could not be read", Some(&error)),
-            Err(error) => log.warn("library video ids could not be read", Some(&error)),
+        match tokio::task::spawn_blocking(move || media.all_items()).await {
+            Ok(Ok(items)) => {
+                for item in items {
+                    if item.audio_codec.is_none() {
+                        continue;
+                    }
+                    let Some(video_id) = item.youtube_vid else { continue };
+                    if std::fs::metadata(&item.uri).is_ok_and(|meta| meta.is_file() && meta.len() > 0) {
+                        ids.insert(video_id);
+                    }
+                }
+            }
+            Ok(Err(error)) => log.warn("library audio files could not be read", Some(&error)),
+            Err(error) => log.warn("library audio files could not be read", Some(&error)),
+        }
+        match downloads.snapshot().await {
+            Ok(tasks) => {
+                for task in tasks {
+                    if task.state != ym_download::DownloadState::Completed || task.format.is_video() {
+                        continue;
+                    }
+                    let Some(uri) = task.file_uri else { continue };
+                    let Some(file) = url::Url::parse(&uri).ok().and_then(|uri| uri.to_file_path().ok()) else {
+                        continue;
+                    };
+                    if std::fs::metadata(file).is_ok_and(|meta| meta.is_file() && meta.len() > 0) {
+                        ids.insert(task.video_id);
+                    }
+                }
+            }
+            Err(error) => log.warn("completed downloads could not be read", Some(&error)),
         }
         ids
     });
