@@ -18,6 +18,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.PlaylistAdd
 import androidx.compose.material.icons.automirrored.filled.PlaylistAddCheck
 import androidx.compose.material.icons.filled.Shuffle
+import androidx.compose.material.icons.outlined.CloudDownload
 import androidx.compose.material.icons.outlined.FileDownload
 import androidx.compose.material.icons.outlined.Image
 import androidx.compose.material.icons.outlined.LibraryAdd
@@ -103,6 +104,11 @@ class PlaylistSession(
      *  show once and clear. */
     var saveResult by mutableStateOf<Result<Boolean>?>(null)
 
+    /** Save the complete (already public to this signed-in account) playlist metadata, not audio. */
+    var savingOffline by mutableStateOf(false)
+        private set
+    var offlineSaveResult by mutableStateOf<Result<Int>?>(null)
+
     val feed = FeedSession(scope, log) { continuation ->
         val snapshots = graph.offlinePlaylistSnapshots
         val accountId = if (graph.guest) null else (
@@ -154,6 +160,56 @@ class PlaylistSession(
             } catch (error: Throwable) {
                 log?.log(Logger.Level.WARN, "remove from playlist failed", error)
                 Result.failure(error)
+            }
+        }
+    }
+
+    /** Fetch every continuation and atomically publish an ordered offline playlist snapshot.
+     * A failed or interrupted fetch retains the previous snapshot rather than replacing it with
+     * the first page alone. Duplicate video IDs remain separate playlist rows. */
+    fun saveEntirePlaylistOffline() {
+        val store = graph.offlinePlaylistSnapshots ?: return
+        if (savingOffline) return
+        savingOffline = true
+        scope.launch {
+            offlineSaveResult = try {
+                val accountId = if (graph.guest) null else (
+                    graph.account.account.value?.channelId
+                        ?: graph.settings.string(LastAuthenticatedChannelId, "").value.takeIf(String::isNotBlank)
+                )
+                require(!accountId.isNullOrBlank()) { "Sign in to save your playlists offline." }
+                val first = graph.engines.extractPlaylistDetail(url, continuation = null, logger = log)
+                val rows = first.sections.flatMap { it.items }.filter { it.kind == YtFeedItem.KIND_VIDEO }.toMutableList()
+                var token = first.continuation?.takeIf(String::isNotBlank)
+                val seen = mutableSetOf<String>()
+                var pages = 1
+                while (token != null) {
+                    check(pages < 300 && rows.size <= 20_000 && seen.add(token)) {
+                        "The playlist could not be fully saved; the previous offline copy was preserved."
+                    }
+                    val next = graph.engines.extractPlaylistDetail(url, continuation = token, logger = log)
+                    rows += next.sections.flatMap { it.items }.filter { it.kind == YtFeedItem.KIND_VIDEO }
+                    token = next.continuation?.takeIf(String::isNotBlank)
+                    pages++
+                }
+                check(rows.size <= 20_000) { "Playlist exceeds offline snapshot limit of 20,000 videos." }
+                store.savePage(
+                    accountId,
+                    url,
+                    first.copy(
+                        sections = listOf(io.ymusic.dynamicengine.yt.YtSection(items = rows)),
+                        continuation = null,
+                    ),
+                    continuation = null,
+                )
+                Result.success(rows.size)
+            } catch (cancel: CancellationException) {
+                throw cancel
+            } catch (error: Throwable) {
+                log?.log(Logger.Level.WARN, "complete offline playlist save failed", error)
+                Result.failure(error)
+            } finally {
+                savingOffline = false
             }
         }
     }
@@ -214,6 +270,18 @@ fun PlaylistDetailScreen(
         }
     }
 
+    s.offlineSaveResult?.let { result ->
+        val snackbar = LocalSnackbar.current
+        val message = result.fold(
+            onSuccess = { "Saved $it playlist entries for offline browsing (audio downloads are separate)." },
+            onFailure = { "Could not save full offline playlist: " + (it.message ?: "download pages unavailable") },
+        )
+        LaunchedEffect(result, message) {
+            snackbar(message)
+            s.offlineSaveResult = null
+        }
+    }
+
     s.removeResult?.let { result ->
         val snackbar = LocalSnackbar.current
         val message = result.fold(
@@ -263,6 +331,10 @@ fun PlaylistDetailScreen(
                             }
                         },
                         onDownload = onDownload?.let { open -> { open(title, s.feed.pager) } },
+                        onSaveOffline = if (coordinator.graph.offlinePlaylistSnapshots != null) {
+                            { s.saveEntirePlaylistOffline() }
+                        } else null,
+                        savingOffline = s.savingOffline,
                         onCreateLocal = store?.let { { creatingLocal = title } },
                         save = ready?.pageHeader?.savePlaylistId?.let { playlistId ->
                             { SavePlaylistToggle(s.saved, s.saving) { s.toggleSaved(playlistId) } }
@@ -296,6 +368,8 @@ internal fun PlaylistHeader(
     meta: String?,
     onShuffle: (() -> Unit)?,
     onDownload: (() -> Unit)? = null,
+    onSaveOffline: (() -> Unit)? = null,
+    savingOffline: Boolean = false,
     onCreateLocal: (() -> Unit)? = null,
     save: (@Composable () -> Unit)? = null,
     onShare: (() -> Unit)? = null,
@@ -322,6 +396,14 @@ internal fun PlaylistHeader(
             save?.invoke()
             ActionIcon(Icons.Outlined.Share, stringResource(Res.string.cd_share), enabled = onShare != null, onClick = { onShare?.invoke() })
             ActionIcon(Icons.Outlined.FileDownload, stringResource(Res.string.cd_download), enabled = onDownload != null, onClick = { onDownload?.invoke() })
+            if (onSaveOffline != null) {
+                if (savingOffline) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                else ActionIcon(
+                    Icons.Outlined.CloudDownload,
+                    "Save complete playlist list for offline browsing (does not download audio)",
+                    onClick = onSaveOffline,
+                )
+            }
             if (onCreateLocal != null) ActionIcon(Icons.Outlined.LibraryAdd, stringResource(Res.string.local_playlist_create), onClick = onCreateLocal)
             Box(Modifier.weight(1f))
             Box(
