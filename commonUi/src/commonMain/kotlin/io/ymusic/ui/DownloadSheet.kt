@@ -143,7 +143,7 @@ private const val QUALITY_COLLAPSE_OVER = 6
 internal fun DownloadSheet(
     state: DownloadOptionsState,
     locationName: String?,
-    onPickLocation: () -> Unit,
+    onPickLocation: (() -> Unit)?,
     onRetry: () -> Unit,
     onSignIn: (() -> Unit)?,
     onDownload: () -> Unit,
@@ -411,7 +411,7 @@ private fun MoreTile(label: String, detail: String?, modifier: Modifier, onClick
             .height(60.dp)
             .clip(RoundedCornerShape(12.dp))
             .background(DesignColors.SurfaceDim)
-            .clickable(onClick = onClick),
+            .clickable(enabled = onClick != null) { onClick?.invoke() },
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
     ) {
@@ -480,7 +480,7 @@ private fun DropdownOptionRow(icon: ImageVector, title: String, value: String, c
 }
 
 @Composable
-private fun OptionRow(icon: ImageVector, title: String, value: String, onClick: () -> Unit, menu: @Composable () -> Unit = {}) {
+private fun OptionRow(icon: ImageVector, title: String, value: String, onClick: (() -> Unit)?, menu: @Composable () -> Unit = {}) {
     Row(
         Modifier
             .fillMaxWidth()
@@ -503,7 +503,7 @@ private fun OptionRow(icon: ImageVector, title: String, value: String, onClick: 
                 menu()
             }
         }
-        Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null, Modifier.size(16.dp), tint = DesignColors.InkFaint)
+        if (onClick != null) Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null, Modifier.size(16.dp), tint = DesignColors.InkFaint)
     }
 }
 
