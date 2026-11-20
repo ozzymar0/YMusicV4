@@ -34,15 +34,50 @@ jobs:
         shell: bash
         run: git config --global core.autocrlf false
       - uses: actions/checkout@v4
+      - name: Check out matching FFmpeg build sources
+        uses: actions/checkout@v4
+        with:
+          repository: ymusic-io/ffmpeg-build
+          ref: 4d2dc9ae0c73dc5f01733f18af070412013a6a93
+          submodules: recursive
+          path: ffmpeg-build
+          persist-credentials: false
       # Match upstream's MinGW Rust target. QuickJS's C sources are not MSVC-compatible.
       - uses: msys2/setup-msys2@v2
         id: msys2
         with:
           msystem: MINGW64
+          update: true
+          install: git make diffutils autoconf automake libtool patch mingw-w64-x86_64-toolchain mingw-w64-x86_64-nasm mingw-w64-x86_64-pkgconf mingw-w64-x86_64-meson mingw-w64-x86_64-ninja mingw-w64-x86_64-zlib
           cache: false
-      - name: Install MinGW GCC
+      - name: Restore FFmpeg libraries needed by Rust MSE
+        id: ffmpeg-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ffmpeg-build/out/windows-x86_64
+            ffmpeg-build/.deps
+          key: ffmpeg-windows-mingw64-4d2dc9ae0c73dc5f01733f18af070412013a6a93
+      - name: Build native Windows FFmpeg and MSE dependencies
+        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        working-directory: ffmpeg-build
         shell: msys2 {0}
-        run: pacman --noconfirm -S --needed mingw-w64-x86_64-toolchain
+        env:
+          HOST_CC: gcc
+        run: |
+          scripts/build-desktop.sh || {
+            for log in .deps/.build/*/config.log; do
+              [ -f "$log" ] && { echo "::group::$log"; tail -n 80 "$log"; echo "::endgroup::"; }
+            done
+            exit 1
+          }
+      - name: Verify matching FFmpeg libraries and headers
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          test -s ffmpeg-build/out/windows-x86_64/pack/ffmpeg.exe
+          test -d ffmpeg-build/out/windows-x86_64/include
+          test -d ffmpeg-build/out/windows-x86_64/lib
       - name: Install Rust GNU host
         shell: bash
         run: |
@@ -69,6 +104,7 @@ jobs:
           set -euo pipefail
           mingw="$(cygpath -u '${{ steps.msys2.outputs.msys2-location }}')/mingw64/bin"
           export PATH="$mingw:$PATH"
+          export FFMPEG_BUILD_DIR="$(cygpath -m "$GITHUB_WORKSPACE/ffmpeg-build")"
           cargo check --locked -p ymusic
       - name: Test unified Rust playback and offline playlist snapshots
         working-directory: desktopRust
@@ -77,5 +113,6 @@ jobs:
           set -euo pipefail
           mingw="$(cygpath -u '${{ steps.msys2.outputs.msys2-location }}')/mingw64/bin"
           export PATH="$mingw:$PATH"
+          export FFMPEG_BUILD_DIR="$(cygpath -m "$GITHUB_WORKSPACE/ffmpeg-build")"
           cargo test --locked -p ymusic unified_offline_tests
           cargo test --locked -p ymusic offline_playlists::tests
