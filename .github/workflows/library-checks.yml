@@ -130,7 +130,10 @@ jobs:
         run: |
           set -euo pipefail
           mingw="$(cygpath -u '${{ steps.msys2.outputs.msys2-location }}')/mingw64/bin"
-          export PATH="$mingw:$PATH"
+          ffmpeg_dlls="$(cygpath -u "$GITHUB_WORKSPACE/ffmpeg-build/out/windows-x86_64/pack")"
+          # Cargo's test EXE is outside the staged app folder, so Windows cannot find
+          # libav*.dll unless its actual directory is also on the process DLL search PATH.
+          export PATH="$ffmpeg_dlls:$mingw:$PATH"
           export FFMPEG_BUILD_DIR="$(cygpath -m "$GITHUB_WORKSPACE/ffmpeg-build")"
           cargo test --locked -p ymusic unified_offline_tests
           cargo test --locked -p ymusic offline_playlists::tests
