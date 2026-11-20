@@ -21,6 +21,7 @@ mod dev_instance;
 mod dock_quicklist;
 mod download_dialog;
 mod downloads;
+mod download_index;
 mod downloads_view;
 mod elevated_dialog;
 mod equalizer;
