@@ -4,6 +4,10 @@ import io.ymusic.download.internal.downloadDbDispatcher
 import io.ymusic.ytmedia.cache.MediaCache
 import io.ymusic.ytmedia.cache.SegmentIndex
 import kmpcommon.log.Logger
+import kmpcommon.uri.Uri
+import kmpcommon.uri.filePath
+import okio.FileSystem
+import okio.Path.Companion.toPath
 import kmphttp.KmpHttpClient
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -231,6 +235,25 @@ class DownloadService(
             }
             _changes.emit(DownloadChange.Removed(id))
         }
+    }
+
+    /** Permanently delete a completed file in this app's current download directory, then remove
+     * its queue record. Never change cloud playlist membership or delete arbitrary imported files.
+     * Returns false if the record or safely-owned file is missing. */
+    suspend fun deleteFinishedFile(id: String): Boolean {
+        initIfNotYet()
+        val task = store.get(id)?.takeIf { it.state == DownloadState.COMPLETED } ?: return false
+        val output = task.fileUri?.let(Uri::parse) ?: return false
+        val folder = Uri.parse(downloadFolder())
+        if (output.scheme != "file" || folder.scheme != "file") return false
+        val target = output.filePath().toPath()
+        val base = folder.filePath().toPath()
+        if (target.parent != base) return false
+        withContext(Dispatchers.IO) {
+            FileSystem.SYSTEM.delete(target, mustExist = false)
+        }
+        remove(id)
+        return true
     }
 
     /** Point a completed task at its file's new uri, after the file was renamed or moved outside the service. */
