@@ -6,6 +6,7 @@ use ym_common::log::Logger;
 use ym_engine::yt::YtAccountInfo;
 
 use crate::graph::{AppGraph, on_core};
+use crate::offline_playlists::ACCOUNT_KEY;
 use crate::signin::AccountChanged;
 
 /// The app's one [`AccountController`], for any view to read or observe.
@@ -39,12 +40,15 @@ impl AccountController {
 
     fn probe(&self, cx: &mut Context<Self>) {
         let (engine, log) = (cx.global::<AppGraph>().engine(), self.log.clone());
+        let offline_account = cx.global::<AppGraph>().settings.string(ACCOUNT_KEY, "").unwrap_or_default();
         let probe = on_core(cx, async move {
             let signed_in = match engine.login_status(&log).await {
                 Ok(signed_in) => signed_in,
                 Err(error) => {
                     log.warn("startup login-status probe failed", Some(&error));
-                    false
+                    // A failed *network* probe is not a confirmed sign-out. Let the Account tab
+                    // render previously saved playlist metadata for the last authenticated user.
+                    !offline_account.is_empty()
                 }
             };
             if !signed_in {
@@ -67,6 +71,9 @@ impl AccountController {
                     controller.sign_out(cx);
                 } else {
                     controller.account = account;
+                    if let Some(channel_id) = controller.account.as_ref().and_then(|account| account.channel_id.clone()) {
+                        save_offline_identity(cx, channel_id);
+                    }
                 }
                 controller.profile_ready = true;
                 cx.notify();
@@ -79,6 +86,8 @@ impl AccountController {
     /// After the sign-in screen's cookie gate passed: re-scrape the session under the new cookies,
     /// pull the account card, then everything reloads under the new identity.
     pub fn on_login_complete(&mut self, cx: &mut Context<Self>) {
+        // Switching accounts must not open the previous user's offline playlists.
+        save_offline_identity(cx, String::new());
         self.profile_ready = false;
         self.signed_in = true;
         cx.notify();
@@ -99,6 +108,9 @@ impl AccountController {
             let account = fetch.await.flatten();
             this.update(cx, |controller, cx| {
                 controller.account = account;
+                if let Some(channel_id) = controller.account.as_ref().and_then(|account| account.channel_id.clone()) {
+                    save_offline_identity(cx, channel_id);
+                }
                 controller.profile_ready = true;
                 cx.notify();
                 cx.emit(AccountChanged);
@@ -110,6 +122,7 @@ impl AccountController {
 
     /// The bundle's logout and an anonymous session refresh; signed out either way.
     pub fn sign_out(&mut self, cx: &mut Context<Self>) {
+        save_offline_identity(cx, String::new());
         let (engines, log) = (cx.global::<AppGraph>().engines.clone(), self.log.clone());
         let done = on_core(cx, async move { crate::signin::sign_out(engines, &log).await });
         cx.spawn(async move |this, cx| {
@@ -124,4 +137,18 @@ impl AccountController {
         })
         .detach();
     }
+}
+
+/// Update only an account identifier, never cookies or credentials. Stage synchronously so the UI
+/// cannot briefly show the previous account, then commit on a disk worker.
+fn save_offline_identity(cx: &App, channel_id: String) {
+    let graph = cx.global::<AppGraph>();
+    let settings = graph.settings.clone();
+    let log = graph.log.fork("offline-playlists");
+    settings.stage_raw(ACCOUNT_KEY, channel_id);
+    graph.tokio.spawn_blocking(move || {
+        if let Err(error) = settings.commit(ACCOUNT_KEY) {
+            log.warn(&format!("Could not persist offline account identity: {error}"), None);
+        }
+    });
 }
