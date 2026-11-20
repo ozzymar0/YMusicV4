@@ -47,6 +47,7 @@ mod media_session;
 mod mini_player;
 mod now_playing;
 mod offline;
+mod offline_playlists;
 mod play_again;
 mod play_history;
 mod playback;
