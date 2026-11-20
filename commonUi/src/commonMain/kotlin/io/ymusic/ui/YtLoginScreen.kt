@@ -189,6 +189,7 @@ internal class AccountController(
                     signOut()
                 } else {
                     _account.value = acct
+                    acct?.channelId?.let { graph.settings.putString(LastAuthenticatedChannelId, it) }
                 }
             }
             _profileReady.value = true
@@ -201,6 +202,8 @@ internal class AccountController(
     fun onLoginComplete(then: (() -> Unit)? = null) {
         scope.launch {
             _profileReady.value = false
+            // Account switches must not retain the previous account's offline playlist identity.
+            graph.settings.remove(LastAuthenticatedChannelId)
             _signedIn.value = true
             // Re-scrape the session under the new cookies so authenticated calls carry the account's
             // SESSION_INDEX before the account fetch and feed reload below. A failure means every
@@ -211,6 +214,7 @@ internal class AccountController(
             _account.value = runSuspendCatching { graph.engines.ytAccountInfo(refresh = true) }
                 .onFailure { log?.log(Logger.Level.WARN, "post-login account fetch failed", it) }
                 .getOrNull()
+            _account.value?.channelId?.let { graph.settings.putString(LastAuthenticatedChannelId, it) }
             loginEpoch.value += 1
             _profileReady.value = true
             graph.player.refreshOnNext()
@@ -236,6 +240,7 @@ internal class AccountController(
     fun signOut() {
         log?.log(Logger.Level.INFO, "DBG signOut clicked scopeActive=${scope.coroutineContext[kotlinx.coroutines.Job]?.isActive}")
         scope.launch {
+            graph.settings.remove(LastAuthenticatedChannelId)
             log?.log(Logger.Level.INFO, "DBG signOut launched")
             // The UI flips to signed-out either way (the user asked to leave), but a failed engine
             // logout leaves the jar authenticated — that mismatch must reach telemetry.
