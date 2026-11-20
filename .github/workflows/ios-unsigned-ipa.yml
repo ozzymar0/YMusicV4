@@ -5,6 +5,7 @@ on:
     branches:
       - ci/ios-unsigned-ipa
       - feature/unified-offline-library
+      - development/unified-library-integration
   workflow_dispatch:
 
 permissions:
