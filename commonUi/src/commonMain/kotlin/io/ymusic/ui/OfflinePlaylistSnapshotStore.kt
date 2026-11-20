@@ -40,6 +40,33 @@ class OfflinePlaylistSnapshotStore(
         lock.withLock { read(accountId, url)?.asPage() }
     }
 
+    /** Playlists saved on this device, for the account tab when the network is unavailable. */
+    suspend fun list(accountId: String): List<OfflinePlaylistLink> = withContext(Dispatchers.IO) {
+        if (accountId.isBlank()) return@withContext emptyList()
+        lock.withLock {
+            fileSystem.listOrNull(directory).orEmpty().asSequence()
+                .filter { it.name.startsWith("playlist-") && it.name.endsWith(".json") }
+                .mapNotNull { path ->
+                    try {
+                        val root = Json.parseToJsonElement(fileSystem.source(path).buffer().use { it.readUtf8() }).jsonObject
+                        if (root["version"]?.jsonPrimitive?.content != "1" ||
+                            root["account"]?.jsonPrimitive?.content != accountId) return@mapNotNull null
+                        val url = root["url"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                        val title = root["title"]?.jsonPrimitive?.contentOrNull?.ifBlank { null } ?: url
+                        OfflinePlaylistLink(
+                            url = url,
+                            title = title,
+                            count = root["count"]?.jsonPrimitive?.contentOrNull?.toIntOrNull(),
+                        )
+                    } catch (_: Exception) {
+                        null
+                    }
+                }
+                .sortedBy { it.title.lowercase() }
+                .toList()
+        }
+    }
+
     suspend fun savePage(accountId: String, url: String, page: YtFeedPage, continuation: String?) {
         if (accountId.isBlank() || url.isBlank()) return
         withContext(Dispatchers.IO) {
@@ -140,3 +167,6 @@ class OfflinePlaylistSnapshotStore(
 
 /** Clear on explicit sign-out or account switch; never persist authentication secrets. */
 internal const val LastAuthenticatedChannelId = "unified.offline.lastAuthenticatedChannelId"
+
+/** A playlist previously loaded on this device, with a private account-scoped snapshot. */
+internal data class OfflinePlaylistLink(val url: String, val title: String, val count: Int?)
