@@ -67,6 +67,28 @@ class OfflinePlaylistSnapshotStore(
         }
     }
 
+    /** After a confirmed YouTube playlist removal, update this device's offline metadata only.
+     * Repeated video IDs are separate playlist rows, so remove exactly one occurrence. No network
+     * mutation happens here and removing a downloaded file never calls this method. */
+    suspend fun removeCachedVideo(accountId: String, url: String, videoId: String): Boolean {
+        val page = load(accountId, url) ?: return false
+        val items = page.sections.flatMap { it.items }.toMutableList()
+        val index = items.indexOfFirst { it.id == videoId }
+        if (index < 0) return false
+        items.removeAt(index)
+        val count = page.pageHeader?.itemCount?.let { (it - 1).coerceAtLeast(0) }
+        savePage(
+            accountId, url,
+            page.copy(
+                sections = listOf(YtSection(items = items)),
+                continuation = null,
+                pageHeader = page.pageHeader?.copy(itemCount = count),
+            ),
+            continuation = null,
+        )
+        return true
+    }
+
     suspend fun savePage(accountId: String, url: String, page: YtFeedPage, continuation: String?) {
         if (accountId.isBlank() || url.isBlank()) return
         withContext(Dispatchers.IO) {
