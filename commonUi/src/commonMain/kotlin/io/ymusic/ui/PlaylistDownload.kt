@@ -159,7 +159,8 @@ fun PlaylistDownloadScreen(graph: AppGraph, session: PlaylistDownloadSession, on
                     ffmpegAvailable = downloads.ffmpegAvailable,
                     settings = graph.settings,
                     locationName = locationName,
-                    onPickLocation = { scope.launch { pickDownloadFolder(graph, snackbar, scans) } },
+                    onPickLocation = if (graph.libraryFolderPicker == null) null
+                        else ({ scope.launch { pickDownloadFolder(graph, snackbar, scans) } }),
                     libraryStore = graph.mediaStore,
                 )
             }
@@ -277,7 +278,7 @@ private fun OptionsCard(
     ffmpegAvailable: Boolean,
     settings: SettingsStore,
     locationName: String?,
-    onPickLocation: () -> Unit,
+    onPickLocation: (() -> Unit)?,
     libraryStore: BetterMediaStore?,
 ) {
     Column(
@@ -302,7 +303,8 @@ private fun OptionsCard(
                 style = TextStyle(fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = DesignColors.Ink),
             )
             OutlinedButton(
-                onClick = onPickLocation,
+                onClick = { onPickLocation?.invoke() },
+                enabled = onPickLocation != null,
                 modifier = Modifier.weight(1f).height(36.dp),
                 shape = RoundedCornerShape(9.dp),
                 border = androidx.compose.foundation.BorderStroke(1.dp, DesignColors.Outline),
