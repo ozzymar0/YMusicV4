@@ -1,0 +1,90 @@
+name: Propose upstream updates
+on:
+  schedule:
+    - cron: '37 8 * * 1'
+  workflow_dispatch:
+  push:
+    paths: [.github/workflows/upstream-updates.yml]
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+concurrency:
+  group: propose-upstream-updates
+  cancel-in-progress: false
+jobs:
+  propose:
+    if: github.repository == 'ozzymar0/YMusicV4'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0
+      - name: Detect new commits and merge upstream on a review branch
+        id: upstream
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh pr list --base master --state open --json headRefName --jq '.[].headRefName' | grep -q '^automation/upstream-'; then
+            echo 'An upstream PR awaits review.'
+            exit 0
+          fi
+          git remote add upstream https://github.com/ymusic-io/YMusicV4.git
+          git fetch upstream master --no-tags
+          if git merge-base --is-ancestor upstream/master HEAD; then
+            echo 'No new upstream commits.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          branch="automation/upstream-$GITHUB_RUN_ID"
+          git switch -c "$branch"
+          if ! git merge --no-ff --no-edit upstream/master; then
+            conflicts="$(git diff --name-only --diff-filter=U | head -c 3000 || true)"
+            git merge --abort || true
+            echo "Upstream merge conflict in: $conflicts" >&2
+            gh issue create --title "Upstream merge needs manual resolution ($GITHUB_RUN_ID)" --body "Conflicting files: $conflicts. See $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID. No changes made to master."
+            exit 1
+          fi
+          git push origin "HEAD:refs/heads/$branch"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+      - name: Set up Java for checks
+        if: steps.upstream.outputs.branch != ''
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Set up Node.js for checks
+        if: steps.upstream.outputs.branch != ''
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Check JavaScript bundle compilation
+        if: steps.upstream.outputs.branch != ''
+        id: js
+        continue-on-error: true
+        run: ./gradlew --no-daemon :engine-js:closureJs :engine-js:closurePlayerJs
+      - name: Check Rust formatting
+        if: steps.upstream.outputs.branch != ''
+        id: rust
+        continue-on-error: true
+        working-directory: desktopRust
+        run: cargo fmt --all --check
+      - name: Open draft PR regardless of check failures
+        if: steps.upstream.outputs.branch != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ steps.upstream.outputs.branch }}
+          JS_RESULT: ${{ steps.js.outcome }}
+          RUST_RESULT: ${{ steps.rust.outcome }}
+        run: |
+          set -euo pipefail
+          gh pr create --base master --head "$BRANCH" --draft \
+            --title 'Review upstream YMusicV4 updates' \
+            --body "Automatically proposed upstream merge. Manual review and merge required. JavaScript compilation: $JS_RESULT. Rust formatting: $RUST_RESULT. Custom changes have not been automatically overwritten."
+          if [ "$JS_RESULT" != success ] || [ "$RUST_RESULT" != success ]; then
+            echo 'One or more checks failed; draft PR remains open for review.' >&2
+            exit 1
+          fi
