@@ -5,6 +5,10 @@
 use std::collections::HashSet;
 
 use gpui_kit::*;
+use futures::StreamExt;
+use futures::channel::mpsc;
+use ym_download::DownloadChange;
+use crate::graph::{AppGraph, on_core};
 
 use crate::downloads::offline_ids;
 
@@ -26,6 +30,33 @@ impl OfflineMarks {
         let marks = cx.new(|cx| {
             let mut marks = Self { ids: HashSet::new(), generation: 0 };
             crate::library::on_library_change(cx, Self::reload);
+            // The scanner normally updates Library rows after download completion. If it fails,
+            // the download database still has the playable file, so update badges on download
+            // state changes and deletions as well.
+            let mut changes = cx.global::<AppGraph>().downloads.subscribe();
+            let (sender, mut receiver) = mpsc::unbounded::<()>();
+            let forward = on_core(cx, async move {
+                loop {
+                    match changes.recv().await {
+                        Ok(DownloadChange::Completed { .. }
+                           | DownloadChange::Removed { .. }
+                           | DownloadChange::StateChanged { .. }) => {
+                            if sender.unbounded_send(()).is_err() { return; }
+                        }
+                        Ok(_) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                    }
+                }
+            });
+            cx.background_executor().spawn(forward).detach();
+            cx.spawn(async move |this, cx| {
+                while receiver.next().await.is_some() {
+                    if this.update(cx, |marks, cx| marks.reload(cx)).is_err() {
+                        return;
+                    }
+                }
+            }).detach();
             marks.reload(cx);
             marks
         });
