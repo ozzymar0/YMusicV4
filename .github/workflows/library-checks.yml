@@ -3,8 +3,6 @@ on:
   push:
     branches:
       - feature/unified-offline-library
-  pull_request:
-    branches: [master]
 permissions:
   contents: read
 concurrency:
@@ -72,3 +70,12 @@ jobs:
           mingw="$(cygpath -u '${{ steps.msys2.outputs.msys2-location }}')/mingw64/bin"
           export PATH="$mingw:$PATH"
           cargo check --locked -p ymusic
+      - name: Test unified Rust playback and offline playlist snapshots
+        working-directory: desktopRust
+        shell: bash
+        run: |
+          set -euo pipefail
+          mingw="$(cygpath -u '${{ steps.msys2.outputs.msys2-location }}')/mingw64/bin"
+          export PATH="$mingw:$PATH"
+          cargo test --locked -p ymusic unified_offline_tests
+          cargo test --locked -p ymusic offline_playlists::tests
